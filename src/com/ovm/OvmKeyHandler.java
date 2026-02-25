@@ -6,14 +6,15 @@ import net.minecraft.client.settings.KeyBinding;
 
 import cpw.mods.fml.client.registry.KeyBindingRegistry;
 import cpw.mods.fml.common.TickType;
-import cpw.mods.fml.common.network.PacketDispatcher;
 import cpw.mods.fml.relauncher.Side;
 import cpw.mods.fml.relauncher.SideOnly;
 
 /**
  * Client-side key handler for the veinmine modifier key.
- * Registered via KeyBindingRegistry.
- * Sends OvmKeyPacket to server when key is pressed or released.
+ * Does NOT import PacketDispatcher or any Packet class — those have
+ * net.minecraft.network.packet.Packet in their signatures which is
+ * obfuscated at runtime and causes NoClassDefFoundError on class load.
+ * Packet sending is delegated to OvmKeyPacket which uses reflection.
  */
 @SideOnly(Side.CLIENT)
 public class OvmKeyHandler extends KeyBindingRegistry.KeyHandler {
@@ -34,13 +35,13 @@ public class OvmKeyHandler extends KeyBindingRegistry.KeyHandler {
 
     @Override
     public void keyDown(EnumSet<TickType> types, KeyBinding kb, boolean tickEnd, boolean isRepeat) {
-        if (isRepeat) return;  // only send on initial press
-        PacketDispatcher.sendPacketToServer(OvmKeyPacket.make(true));
+        if (isRepeat) return;
+        OvmKeyPacket.send(true);
     }
 
     @Override
     public void keyUp(EnumSet<TickType> types, KeyBinding kb, boolean tickEnd) {
-        PacketDispatcher.sendPacketToServer(OvmKeyPacket.make(false));
+        OvmKeyPacket.send(false);
     }
 
     @Override

@@ -5,34 +5,50 @@ import java.util.HashSet;
 import java.util.Set;
 
 import net.minecraft.entity.player.EntityPlayer;
-import net.minecraft.network.INetworkManager;
-import net.minecraft.network.packet.Packet250CustomPayload;
-
-import cpw.mods.fml.common.network.IPacketHandler;
-import cpw.mods.fml.common.network.Player;
 
 /**
- * Server-side handler for the "ovm" channel.
- * Tracks which players currently hold the veinmine key down.
+ * Server-side key-state tracker for vein mining.
+ * Does NOT implement IPacketHandler directly — that interface has
+ * Packet250CustomPayload in its signature which would cause
+ * NoClassDefFoundError when this class is loaded.
+ *
+ * Instead, OvmMod registers a dynamic Proxy as the IPacketHandler,
+ * which delegates to handlePacketData() here.
  */
-public class OvmPacketHandler implements IPacketHandler {
+public class OvmPacketHandler {
 
-    // Thread-safe set of player usernames with key currently held
     private static final Set<String> activeVeinPlayers =
             Collections.synchronizedSet(new HashSet<String>());
 
-    @Override
-    public void onPacketData(INetworkManager manager, Packet250CustomPayload packet, Player player) {
-        if (!OvmKeyPacket.CHANNEL.equals(packet.channel)) return;
-        if (packet.data == null || packet.data.length < 1) return;
-        if (!(player instanceof EntityPlayer)) return;
+    /**
+     * Called by the dynamic proxy when a packet arrives on the "ovm" channel.
+     * Parameters are Object to avoid any Minecraft class references in signature.
+     *
+     * @param packetObj  Packet250CustomPayload instance (as Object)
+     * @param playerObj  Player instance (as Object, may be EntityPlayer)
+     */
+    public static void handlePacketData(Object packetObj, Object playerObj) {
+        try {
+            // Read channel field
+            String channel = (String) packetObj.getClass().getField("channel").get(packetObj);
+            if (!OvmKeyPacket.CHANNEL.equals(channel)) return;
 
-        String name = ((EntityPlayer) player).username;
-        boolean keyDown = (packet.data[0] == 1);
-        if (keyDown) {
-            activeVeinPlayers.add(name);
-        } else {
-            activeVeinPlayers.remove(name);
+            // Read data field
+            byte[] data = (byte[]) packetObj.getClass().getField("data").get(packetObj);
+            if (data == null || data.length < 1) return;
+
+            // Get player username
+            if (!(playerObj instanceof EntityPlayer)) return;
+            String name = ((EntityPlayer) playerObj).username;
+
+            boolean keyDown = (data[0] == 1);
+            if (keyDown) {
+                activeVeinPlayers.add(name);
+            } else {
+                activeVeinPlayers.remove(name);
+            }
+        } catch (Exception e) {
+            System.out.println("[OVM] OvmPacketHandler error: " + e);
         }
     }
 
@@ -40,7 +56,6 @@ public class OvmPacketHandler implements IPacketHandler {
         return activeVeinPlayers.contains(player.username);
     }
 
-    /** Called when a player disconnects to clean up state. */
     public static void onPlayerLeft(EntityPlayer player) {
         activeVeinPlayers.remove(player.username);
     }

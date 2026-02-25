@@ -18,7 +18,9 @@ import net.minecraft.client.Minecraft;
 import net.minecraft.client.settings.KeyBinding;
 import net.minecraftforge.common.MinecraftForge;
 import java.lang.reflect.Field;
+import java.lang.reflect.InvocationHandler;
 import java.lang.reflect.Method;
+import java.lang.reflect.Proxy;
 import java.util.EnumSet;
 
 @Mod(modid = OvmMod.MODID, name = OvmMod.NAME, version = OvmMod.VERSION)
@@ -40,8 +42,29 @@ public class OvmMod {
     public void init(FMLInitializationEvent event) {
         System.out.println("[OVM] Init");
 
-        // Register server-side packet handler for key-state sync from client
-        NetworkRegistry.instance().registerChannel(new OvmPacketHandler(), OvmKeyPacket.CHANNEL);
+        // Register server-side packet handler via dynamic proxy.
+        // We cannot use "new OvmPacketHandler()" directly because IPacketHandler's
+        // onPacketData(INetworkManager, Packet250CustomPayload, Player) signature
+        // references Packet250CustomPayload whose superclass Packet is obfuscated at runtime.
+        try {
+            Class<?> iph = Class.forName("cpw.mods.fml.common.network.IPacketHandler");
+            Object proxy = Proxy.newProxyInstance(
+                OvmMod.class.getClassLoader(),
+                new Class<?>[]{iph},
+                new InvocationHandler() {
+                    public Object invoke(Object proxy, Method method, Object[] args) {
+                        if ("onPacketData".equals(method.getName()) && args != null && args.length == 3) {
+                            OvmPacketHandler.handlePacketData(args[1], args[2]);
+                        }
+                        return null;
+                    }
+                }
+            );
+            NetworkRegistry.instance().registerChannel(
+                (cpw.mods.fml.common.network.IPacketHandler) proxy, OvmKeyPacket.CHANNEL);
+        } catch (Exception e) {
+            System.out.println("[OVM] Failed to register packet handler: " + e);
+        }
 
         // Register server-side VeinMiner event listener
         MinecraftForge.EVENT_BUS.register(new VeinMiner());
