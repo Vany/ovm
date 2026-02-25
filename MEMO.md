@@ -91,21 +91,27 @@ javap -private net/minecraft/client/Minecraft.class
 
 ## Obfuscation: which classes need reflection
 
-All `net.minecraft.*` classes are obfuscated in the runtime `minecraft.jar`. The JVM resolves
-**every class reference in a `.class` constant pool** at class-load time — not just executed code.
-So even `new EntityItem(...)` in a never-called method causes `NoClassDefFoundError` on load.
+`EventBus.register(obj)` calls `getDeclaredMethods0()` on the registered class, forcing the JVM
+to resolve every type in every method descriptor — including private methods. Any `net.minecraft.*`
+class in a method signature triggers classloading and may crash if that class or its transitive
+dependencies are obfuscated at runtime.
 
-Classes confirmed to require full reflection (never reference directly in bytecode):
+**Rule for EventBus listener classes**: keep all Minecraft types OUT of method signatures.
+Use `Object` parameters in all private helpers; cast inside the method body.
+Only the `@ForgeSubscribe` method may have a typed Minecraft parameter — pick events whose
+hierarchy does not chain to obfuscated types.
+
+Classes requiring reflection (never put in method signatures of EventBus-registered classes):
 - `EntityLiving` → obfuscated to `md`
 - `EntityItem` → obfuscated to `px`
 - `EntityPlayerSP` → obfuscated
+- `World`, `Block`, `ItemStack` — safe in method bodies, but **not in signatures** of registered classes
 
-Classes confirmed safe to reference directly (Forge transformers provide deobf names):
-- `EntityPlayer`, `EntityPlayerMP`, `Block`, `World`, `ItemStack`, `FoodStats`
+Classes safe anywhere (Forge transformers provide deobf names):
+- `EntityPlayer`, `EntityPlayerMP`, `FoodStats`
 - All `net.minecraftforge.*` and `cpw.mods.fml.*` classes
 
-Rule: if a class is in `net.minecraft.entity.*` below `EntityPlayer`, use reflection.
-Use `Class.forName("full.class.Name")` for class lookup — string literals are safe.
+Use `Class.forName("full.class.Name")` for class lookup — string literals never trigger classloading.
 
 ## Known issues / deferred
 - Client keybind for toggle (alternative to sneak): requires `KeyInputEvent` + server sync packet.
