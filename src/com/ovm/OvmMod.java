@@ -26,7 +26,7 @@ import java.util.EnumSet;
 public class OvmMod {
     public static final String MODID   = "ovm";
     public static final String NAME    = "OVM";
-    public static final String VERSION = "0.4.8";
+    public static final String VERSION = "0.5.9";
     public static final String CHANNEL = "OVM|VM";
 
     @Instance(MODID)
@@ -61,7 +61,16 @@ public class OvmMod {
     @SideOnly(Side.CLIENT)
     private void initClient() {
         TickRegistry.registerTickHandler(new VersionChatHandler(), Side.CLIENT);
-        MinecraftForge.EVENT_BUS.register(new OvmClientHandler());
+        try {
+            Class<?> cls = Class.forName("com.ovm.OvmClientHandler");
+            Object handler = cls.newInstance();
+            MinecraftForge.EVENT_BUS.register(handler);
+            Method m = cls.getDeclaredMethod("registerActivationKey", int.class);
+            m.setAccessible(true);
+            m.invoke(null, OvmConfig.activationKey);
+        } catch (Exception e) {
+            System.out.println("[OVM] initClient error: " + e);
+        }
     }
 
     @PostInit
@@ -90,7 +99,7 @@ public class OvmMod {
                 if (world == null || player == null) return;
                 for (String name : new String[]{"addChatMessage", "a"}) {
                     try {
-                        player.getClass().getMethod(name, String.class).invoke(player, NAME + " " + VERSION + " loaded. Sneak + left-click to veinmine.");
+                        player.getClass().getMethod(name, String.class).invoke(player, NAME + " " + VERSION + " loaded. Hold ` + left-click to veinmine.");
                         break;
                     } catch (Exception e) { /* try next */ }
                 }

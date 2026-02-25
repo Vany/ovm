@@ -14,6 +14,9 @@ public class OvmConfig {
     public static int maxBlocks       = 64;
     public static int hungerPerBlocks = 32;
     public static boolean dropsToInventory = true;
+    /** LWJGL key code for the veinmine activation key. Default 41 = KEY_GRAVE (on macOS reports as 0, handled automatically) */
+    public static int activationKey = 41;
+
     public static void load(File configDir) {
         Configuration cfg = new Configuration(new File(configDir, "ovm.cfg"));
         try {
@@ -39,6 +42,13 @@ public class OvmConfig {
                 true,
                 "If true, mined drops go to player inventory (overflow drops at feet). If false, drop in place."
             ).getBoolean(true);
+
+            activationKey = cfg.get(
+                Configuration.CATEGORY_GENERAL,
+                "activationKey",
+                41,
+                "LWJGL key code for the veinmine activation key (default: 41 = grave/backtick `; macOS isKeyDown(0) workaround applied automatically)"
+            ).getInt(41);
 
 } finally {
             cfg.save();
