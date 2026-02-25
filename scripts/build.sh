@@ -20,3 +20,27 @@ docker run --rm -v "$REPO:/workspace" $IMAGE bash -c "
 
 echo "Built: $OUT"
 jar tf "$OUT"
+
+# Deploy to Prism mods directory if it exists
+MODS="$REPO/1.4.7/minecraft/mods"
+if [ -d "$MODS" ]; then
+  # Remove old ovm jars (including previous versions and Prism duplicate markers).
+  rm -f "$MODS"/ovm*.jar "$MODS"/ovm*.jar.disabled
+  rm -f "$MODS"/ovm*.duplicate "$MODS"/ovm*.duplicate.disabled
+  rm -f "$MODS"/ovm.jar "$MODS"/ovm.jar.disabled
+
+  deploy_name() {
+    local base="$1"
+    local active="$MODS/$base"
+    local disabled="$active.disabled"
+    if [ -f "$disabled" ]; then
+      cp "$OUT" "$disabled"
+      echo "Deployed: $disabled"
+    else
+      cp "$OUT" "$active"
+      echo "Deployed: $active"
+    fi
+  }
+
+  deploy_name "ovm-${VERSION}.jar"
+fi

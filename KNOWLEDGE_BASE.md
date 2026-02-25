@@ -218,6 +218,11 @@ Verified via `javap` + `conf/joined.srg`:
 | class `WorldClient` | `ayp` | class name |
 | class `EntityClientPlayerMP` | `ays` | class name |
 | class `EntityPlayerSP` | `bag` | class name |
+| class `ItemStack` | `yz` (extends `kv`) | class name |
+| class `EntityPlayer` | `qx` | class name |
+| class `EntityPlayerMP` | `iq` | class name |
+| class `EntityItem` | `px` | class name |
+| class `Block` | `amq` | class name |
 
 **Critical rule**: FML's `RelaunchClassLoader` does NOT remap deobfuscated names for mod code.
 Directly accessing `mc.theWorld`, `mc.thePlayer`, `Minecraft.getMinecraft()` etc. throws
@@ -234,6 +239,70 @@ jar -xf /opt/forge/jars/bin/minecraft.jar net/minecraft/client/Minecraft.class
 javap -private net/minecraft/client/Minecraft.class
 rm -rf net
 ```
+
+### ItemStack Runtime Layout (yz extends kv)
+
+Verified by decompiling `yz` class bytecode with `javap -c`:
+
+**Constructor**: `yz(Class coremods, int itemId, int count, int damage)`
+- arg1 = `Class` (Forge coremods token, always pass `null`)
+- arg2 → `kv.a` = itemId (set via `super(int)`)
+- arg3 → `yz.c` = stackSize / count
+- arg4 → `yz.d` = itemDamage
+
+**MCP field names** (work in deobf source): `itemID`, `stackSize`, `itemDamage`
+**Obfuscated field names** (required at runtime): `kv.a`=itemId, `yz.c`=stackSize, `yz.d`=damage
+
+**Key gotcha**: `yz.copy()` does NOT exist. To clone a stack, call `makeItemStack(itemId, damage, count)` directly.
+
+**Construction pattern** (runtime):
+```java
+// Try (int,int,int) first; if absent, use (Class,int,int,int)
+Constructor<?> ctor = yz.class.getConstructor(Class.class, int.class, int.class, int.class);
+Object stack = ctor.newInstance((Object)null, itemId, count, damage);
+```
+
+### EntityPlayer / EntityPlayerMP Position and Held-Item Fields
+
+Verified from `javap qx` (EntityPlayer) and `javap iq` (EntityPlayerMP):
+
+| MCP name | Obf name | Class | Type | Notes |
+|---|---|---|---|---|
+| `posX` | `bT` | `qx` (EntityPlayer) | `double` | Player X position |
+| `posY` | `bU` | `qx` (EntityPlayer) | `double` | Player Y position |
+| `posZ` | `bV` | `qx` (EntityPlayer) | `double` | Player Z position |
+| `getHeldItem()` | `bD` | `iq` (EntityPlayerMP) | method | Returns active ItemStack |
+
+**Position note**: `posX/Y/Z` are declared on the `Entity` base class, but their obf names
+(`bT/bU/bV`) are discovered via `javap qx`. The MCP names fail at runtime; use obf names in
+`getDoubleField()`.
+
+### Block Drop Methods (all obf to `a` at runtime)
+
+Discovered by scanning `block.getClass().getMethods()` by signature — all three drop methods
+happen to be obfuscated to `a` in 1.4.7, but have unique parameter signatures:
+
+| MCP name | Signature | Purpose |
+|---|---|---|
+| `idDropped` | `(int, Random, int) -> int` | Returns item ID dropped (0 = nothing) |
+| `quantityDropped` | `(Random) -> int` | Returns drop count |
+| `damageDropped` | `(int) -> int` | Returns drop damage value |
+
+**Pattern**: Scan by signature, not by name:
+```java
+for (Method m : block.getClass().getMethods()) {
+    if (m.getReturnType() != int.class) continue;
+    Class<?>[] p = m.getParameterTypes();
+    if (p.length == 3 && p[0]==int.class && p[1]==Random.class && p[2]==int.class)
+        idDroppedMethod = m;   // idDropped(int meta, Random rand, int fortune)
+    else if (p.length == 1 && p[0]==Random.class)
+        quantityDroppedMethod = m;   // quantityDropped(Random rand)
+    else if (p.length == 1 && p[0]==int.class && ...)
+        damageDroppedMethod = m;     // damageDropped(int meta)
+}
+```
+
+**Example** (stone, id=1, meta=0): `idDropped→4` (cobblestone), `quantityDropped→1`, `damageDropped→0`.
 
 ### MCP Obfuscation Mapping
 
@@ -691,6 +760,42 @@ public void tickEnd(...) {
     }
 }
 ```
+
+---
+
+---
+
+## Drop Delivery Approach (VeinMiner v0.3)
+
+### Why captureDrops Failed
+
+`captureDrops` / `capturedDrops` is a Forge mechanism that intercepts `Block.dropBlockAsItemWithChance()`.
+However, for many blocks (e.g. stone id=1) calling `harvestBlock(world, x, y, z, ...)` produces
+**zero** drops because the player tool type / dig speed / silk-touch state doesn't match.
+The `capturedDrops` list remained empty even though stone→cobblestone should drop.
+
+**Fix**: Abandoned `captureDrops` entirely. Instead:
+1. Call `Block.idDropped(meta, rand, fortune)` directly to get the drop item ID.
+2. Call `Block.quantityDropped(rand)` for the drop count.
+3. Call `Block.damageDropped(meta)` for the drop damage value.
+4. Accumulate into a `LinkedHashMap<key, int[]>` where key = `itemId * 65536 + damage`.
+5. After all blocks are removed, spawn compacted stacks at player feet.
+
+### Drop Delivery: spawnEntityInWorld
+
+Drops are spawned via:
+```java
+EntityItem ei = new EntityItem(world, x, y, z, itemStack);
+world.spawnEntityInWorld(ei);
+```
+All via reflection. `EntityItem` class name at runtime: `px`.
+`spawnEntityInWorld` obf name: try `"spawnEntityInWorld"` then `"d"`.
+
+### Build / Deploy
+
+`build.sh` auto-deploys the built jar to `$REPO/1.4.7/minecraft/mods/ovm-<version>.jar`.
+Previously this was a symlink that got silently replaced by `cp` — the real jar is now there.
+Always run `bash scripts/build.sh` from the repo root after code changes.
 
 ---
 

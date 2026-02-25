@@ -10,6 +10,8 @@ import cpw.mods.fml.common.event.FMLPostInitializationEvent;
 import cpw.mods.fml.common.event.FMLPreInitializationEvent;
 import cpw.mods.fml.common.ITickHandler;
 import cpw.mods.fml.common.TickType;
+import cpw.mods.fml.common.network.NetworkMod;
+import cpw.mods.fml.common.network.NetworkRegistry;
 import cpw.mods.fml.common.registry.TickRegistry;
 import cpw.mods.fml.relauncher.Side;
 import cpw.mods.fml.relauncher.SideOnly;
@@ -20,10 +22,12 @@ import java.lang.reflect.Method;
 import java.util.EnumSet;
 
 @Mod(modid = OvmMod.MODID, name = OvmMod.NAME, version = OvmMod.VERSION)
+@NetworkMod(clientSideRequired = true, serverSideRequired = false, channels = { OvmMod.CHANNEL })
 public class OvmMod {
     public static final String MODID   = "ovm";
     public static final String NAME    = "OVM";
-    public static final String VERSION = "0.3.0";
+    public static final String VERSION = "0.4.8";
+    public static final String CHANNEL = "OVM|VM";
 
     @Instance(MODID)
     public static OvmMod instance;
@@ -38,10 +42,17 @@ public class OvmMod {
     public void init(FMLInitializationEvent event) {
         System.out.println("[OVM] Init");
 
-        // Register server-side VeinMiner event listener
-        MinecraftForge.EVENT_BUS.register(new VeinMiner());
+        // Register packet channel with dynamic proxy to handle obfuscated types
+        try {
+            Object handler = OvmPacketHandler.createProxy();
+            NetworkRegistry.instance().registerChannel(
+                (cpw.mods.fml.common.network.IPacketHandler) handler, CHANNEL);
+            System.out.println("[OVM] Packet channel registered");
+        } catch (Exception e) {
+            System.out.println("[OVM] Failed to register packet channel: " + e);
+        }
 
-        // Client-side: version chat message
+        // Client-side: version chat + interaction listener
         if (event.getSide().isClient()) {
             initClient();
         }
@@ -50,6 +61,7 @@ public class OvmMod {
     @SideOnly(Side.CLIENT)
     private void initClient() {
         TickRegistry.registerTickHandler(new VersionChatHandler(), Side.CLIENT);
+        MinecraftForge.EVENT_BUS.register(new OvmClientHandler());
     }
 
     @PostInit
@@ -67,6 +79,8 @@ public class OvmMod {
 
         @Override
         public void tickEnd(EnumSet<TickType> type, Object... tickData) {
+            OvmClientHandler.onTick();
+
             if (done) return;
             Minecraft mc = getMinecraft();
             if (mc == null) return;
