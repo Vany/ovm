@@ -10,6 +10,7 @@
 - Before adding features, check existing open-source for equivalent functionality.
 - When fixing a bug, search for the same condition elsewhere and fix all instances.
 - Add sufficient debug logging during development; strip it for release.
+- when you fixing bug, try to explain why bug apeeared first.
 
 ## environment
 - it's docker project. All must be run in docker amd64
