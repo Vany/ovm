@@ -1,0 +1,7 @@
+.claude/
+1.4.7
+download/
+ovm-*.jar
+
+# Source asset (resized copy lives in src/pack.png)
+oldveinminer.png

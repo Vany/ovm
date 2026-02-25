@@ -1,0 +1,9 @@
+services:
+  dev:
+    build: .
+    platform: linux/amd64
+    volumes:
+      - /Users/vany/l/ovm:/workspace
+    working_dir: /opt/forge
+    stdin_open: true
+    tty: true

@@ -1,0 +1,14 @@
+[{
+  "modid": "ovm",
+  "name": "OVM",
+  "description": "VeinMiner for Minecraft 1.4.7: hold grave key to chain-mine connected ore veins.",
+  "version": "0.3.0",
+  "mcversion": "1.4.7",
+  "url": "",
+  "updateUrl": "",
+  "authors": ["vany <ivan@serezhkin.com>"],
+  "credits": "",
+  "logoFile": "pack.png",
+  "screenshots": [],
+  "dependencies": []
+}]
