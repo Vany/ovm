@@ -16,12 +16,11 @@ import net.minecraftforge.event.entity.player.PlayerInteractEvent;
 /**
  * VeinMiner v0.3.0 — server-side chain-mine with priority flood fill.
  *
- * All Minecraft types (World, EntityPlayer, Block, ItemStack, etc.) are accessed
- * only via reflection or through the event parameter itself, to avoid triggering
+ * All Minecraft types are accessed only via reflection to avoid
  * NoClassDefFoundError when EventBus scans this class's method signatures.
  *
- * The only Minecraft type that appears in a method signature is PlayerInteractEvent
- * (required by @ForgeSubscribe). All other methods use Object / primitives only.
+ * Obfuscated names sourced from forge/conf/packaged.srg (1.4.7-6.6.2.534).
+ * Each helper tries the MCP name first, then the obfuscated name.
  */
 public class VeinMiner {
 
@@ -52,52 +51,47 @@ public class VeinMiner {
     }
 
     // -----------------------------------------------------------------------
-    // Event handler — only Minecraft type in any method signature is
-    // PlayerInteractEvent (required by @ForgeSubscribe).
+    // Event handler
     // -----------------------------------------------------------------------
 
     @ForgeSubscribe
     public void onPlayerInteract(PlayerInteractEvent event) {
-        // All Minecraft access goes through the event fields and reflection.
-        // We never call a helper that takes World/EntityPlayer/Block/ItemStack
-        // as a typed parameter — those types must not appear in method signatures.
-
         try {
             if (event.action != PlayerInteractEvent.Action.LEFT_CLICK_BLOCK) return;
 
-            // entityPlayer is declared on PlayerEvent (superclass), not PlayerInteractEvent.
-            // Direct field access compiles to getfield on PlayerInteractEvent -> NoSuchFieldError
-            // at runtime. Use reflection to walk the superclass chain instead.
-            Object player = getField(event, "entityPlayer");
+            // entityPlayer declared on superclass PlayerEvent — use reflection
+            Object player = getFieldByNames(event, "entityPlayer");
             if (player == null) return;
-            Object world  = getField(player, "worldObj");
+
+            // worldObj field: MCP="worldObj", obf="p"  (Entity.field_70170_p)
+            Object world = getFieldByNames(player, "worldObj", "p");
             if (world == null) return;
 
-            boolean isRemote = getBoolean(world, "isRemote");
+            // isRemote field: MCP="isRemote", obf="I"  (World.field_72995_K)
+            boolean isRemote = getBooleanByNames(world, "isRemote", "I");
             if (isRemote) return;
 
-            // Use sneak state as the veinmine modifier — checked server-side, no packet needed.
-            boolean sneaking = (Boolean) player.getClass().getMethod("isSneaking").invoke(player);
+            // isSneaking: MCP="isSneaking", obf="ai"  (Entity.func_70051_ag)
+            boolean sneaking = invokeBooleanByNames(player, "isSneaking", "ai");
             if (!sneaking) return;
 
             int ox = event.x, oy = event.y, oz = event.z;
             int originId = invokeGetBlockId(world, ox, oy, oz);
             if (!VEINMINE_IDS.contains(originId)) return;
 
-            // Hunger check
-            Object foodStats = invoke(player, "getFoodStats");
+            // Hunger check — getFoodStats: MCP="getFoodStats", obf="cc"
+            Object foodStats = invokeByNames(player, "getFoodStats", "cc");
             if (foodStats == null) return;
-            int foodLevel = invokeInt(foodStats, "getFoodLevel");
+            // getFoodLevel: MCP="getFoodLevel", obf="a" (returns int)
+            int foodLevel = invokeIntByNames(foodStats, "getFoodLevel", "a");
             if (foodLevel < 1) {
-                invoke(player, "addChatMessage", String.class, "[OVM] Not enough hunger to veinmine.");
+                invokeWithStringArg(player, "addChatMessage", "[OVM] Not enough food to veinmine.");
                 return;
             }
 
-            // Priority flood fill
             List<int[]> vein = buildVein(world, ox, oy, oz, originId, OvmConfig.maxBlocks);
             if (vein.isEmpty()) return;
 
-            // Enable drop capture
             setCaptureDrops(player, true);
             clearCapturedDrops(player);
 
@@ -113,17 +107,17 @@ public class VeinMiner {
                     if (!invokeCanHarvest(player, block)) continue;
 
                     int meta = invokeGetBlockMeta(world, bx, by, bz);
-
                     invokeHarvestBlock(block, world, player, bx, by, bz, meta);
                     invokeSetBlock(world, bx, by, bz, 0);
                     minedCount++;
 
-                    // Damage tool
-                    Object held = invoke(player, "getHeldItem");
+                    // Damage tool — getHeldItem: MCP="getHeldItem", obf="bD"
+                    Object held = invokeByNames(player, "getHeldItem", "bD");
                     if (held != null && isItemStackDamageable(held)) {
                         damageItemReflect(held, 1, player);
-                        if (getInt(held, "stackSize") <= 0) {
-                            invoke(player, "destroyCurrentEquippedItem");
+                        if (getIntField(held, "stackSize") <= 0) {
+                            // destroyCurrentEquippedItem: MCP name, obf="bT"
+                            invokeByNames(player, "destroyCurrentEquippedItem", "bT");
                             break;
                         }
                     }
@@ -135,11 +129,11 @@ public class VeinMiner {
             deliverCapturedDrops(world, player);
             clearCapturedDrops(player);
 
-            // Hunger deduction
+            // addExhaustion: MCP="addExhaustion", obf on FoodStats="a(F)"
             if (OvmConfig.hungerPerBlocks > 0 && minedCount > 0) {
                 int pts = minedCount / OvmConfig.hungerPerBlocks;
-                if (pts > 0) {
-                    invoke(player, "addExhaustion", float.class, 4.0f * pts);
+                if (pts > 0 && foodStats != null) {
+                    invokeFloatByNames(foodStats, "addExhaustion", "a", 4.0f * pts);
                 }
             }
 
@@ -148,11 +142,12 @@ public class VeinMiner {
 
         } catch (Exception e) {
             System.out.println("[OVM] VeinMiner error: " + e);
+            e.printStackTrace();
         }
     }
 
     // -----------------------------------------------------------------------
-    // Priority flood fill — only Object and primitives in signatures
+    // Priority flood fill
     // -----------------------------------------------------------------------
 
     private List<int[]> buildVein(Object world, int ox, int oy, int oz, int targetId, int maxCount) {
@@ -184,7 +179,7 @@ public class VeinMiner {
     }
 
     // -----------------------------------------------------------------------
-    // Drop delivery — Object only in signatures
+    // Drop delivery
     // -----------------------------------------------------------------------
 
     private void deliverCapturedDrops(Object world, Object player) {
@@ -193,52 +188,137 @@ public class VeinMiner {
         for (Object ei : drops) {
             if (ei == null) continue;
             Object stack = getEntityItemStack(ei);
-            if (stack == null || getInt(stack, "stackSize") <= 0) continue;
+            if (stack == null || getIntField(stack, "stackSize") <= 0) continue;
             if (OvmConfig.dropsToInventory) {
                 boolean fitted = addToInventory(player, stack);
-                if (!fitted || getInt(stack, "stackSize") > 0) {
-                    double px = getDouble(player, "posX");
-                    double py = getDouble(player, "posY");
-                    double pz = getDouble(player, "posZ");
+                if (!fitted || getIntField(stack, "stackSize") > 0) {
+                    double px = getDoubleField(player, "posX");
+                    double py = getDoubleField(player, "posY");
+                    double pz = getDoubleField(player, "posZ");
                     spawnItemReflect(world, px, py, pz, stack);
                 }
             } else {
-                double px = getDouble(ei, "posX");
-                double py = getDouble(ei, "posY");
-                double pz = getDouble(ei, "posZ");
+                double px = getDoubleField(ei, "posX");
+                double py = getDoubleField(ei, "posY");
+                double pz = getDoubleField(ei, "posZ");
                 spawnItemReflect(world, px, py, pz, stack);
             }
         }
     }
 
     // -----------------------------------------------------------------------
-    // Reflection helpers — no Minecraft types in method signatures
+    // Reflection helpers with dual MCP/obfuscated name support
     // -----------------------------------------------------------------------
 
+    /** Get field by trying multiple names (MCP first, then obfuscated). */
+    private static Object getFieldByNames(Object obj, String... names) {
+        for (String name : names) {
+            try {
+                Field f = obj.getClass().getField(name);
+                return f.get(obj);
+            } catch (Exception ignored) {}
+        }
+        return null;
+    }
+
+    private static boolean getBooleanByNames(Object obj, String... names) {
+        for (String name : names) {
+            try {
+                return obj.getClass().getField(name).getBoolean(obj);
+            } catch (Exception ignored) {}
+        }
+        return false;
+    }
+
+    private static boolean invokeBooleanByNames(Object obj, String... names) {
+        for (String name : names) {
+            try {
+                return (Boolean) obj.getClass().getMethod(name).invoke(obj);
+            } catch (Exception ignored) {}
+        }
+        return false;
+    }
+
+    private static Object invokeByNames(Object obj, String... names) {
+        for (String name : names) {
+            try {
+                return obj.getClass().getMethod(name).invoke(obj);
+            } catch (Exception ignored) {}
+        }
+        return null;
+    }
+
+    private static int invokeIntByNames(Object obj, String... names) {
+        for (String name : names) {
+            try {
+                return (Integer) obj.getClass().getMethod(name).invoke(obj);
+            } catch (Exception ignored) {}
+        }
+        return 0;
+    }
+
+    private static void invokeFloatByNames(Object obj, String mcpName, String obfName, float arg) {
+        for (String name : new String[]{mcpName, obfName}) {
+            try {
+                obj.getClass().getMethod(name, float.class).invoke(obj, arg);
+                return;
+            } catch (Exception ignored) {}
+        }
+    }
+
+    private static void invokeWithStringArg(Object obj, String method, String arg) {
+        try {
+            obj.getClass().getMethod(method, String.class).invoke(obj, arg);
+        } catch (Exception ignored) {}
+    }
+
+    // World.getBlockId(III): MCP="getBlockId", obf="a"
     private static Method getBlockIdMethod = null;
     private static int invokeGetBlockId(Object world, int x, int y, int z) {
         try {
-            if (getBlockIdMethod == null)
-                getBlockIdMethod = world.getClass().getMethod("getBlockId", int.class, int.class, int.class);
+            if (getBlockIdMethod == null) {
+                for (String n : new String[]{"getBlockId", "a"}) {
+                    try {
+                        getBlockIdMethod = world.getClass().getMethod(n, int.class, int.class, int.class);
+                        break;
+                    } catch (Exception ignored) {}
+                }
+            }
+            if (getBlockIdMethod == null) return 0;
             return (Integer) getBlockIdMethod.invoke(world, x, y, z);
         } catch (Exception e) { return 0; }
     }
 
+    // World.getBlockMetadata(III): MCP="getBlockMetadata", obf="h"
     private static Method getBlockMetaMethod = null;
     private static int invokeGetBlockMeta(Object world, int x, int y, int z) {
         try {
-            if (getBlockMetaMethod == null)
-                getBlockMetaMethod = world.getClass().getMethod("getBlockMetadata", int.class, int.class, int.class);
+            if (getBlockMetaMethod == null) {
+                for (String n : new String[]{"getBlockMetadata", "h"}) {
+                    try {
+                        getBlockMetaMethod = world.getClass().getMethod(n, int.class, int.class, int.class);
+                        break;
+                    } catch (Exception ignored) {}
+                }
+            }
+            if (getBlockMetaMethod == null) return 0;
             return (Integer) getBlockMetaMethod.invoke(world, x, y, z);
         } catch (Exception e) { return 0; }
     }
 
+    // World.setBlockWithNotify(IIII): MCP="setBlockWithNotify", obf="c"
     private static Method setBlockMethod = null;
     private static void invokeSetBlock(Object world, int x, int y, int z, int id) {
         try {
-            if (setBlockMethod == null)
-                setBlockMethod = world.getClass().getMethod("setBlockWithNotify", int.class, int.class, int.class, int.class);
-            setBlockMethod.invoke(world, x, y, z, id);
+            if (setBlockMethod == null) {
+                for (String n : new String[]{"setBlockWithNotify", "c"}) {
+                    try {
+                        setBlockMethod = world.getClass().getMethod(n, int.class, int.class, int.class, int.class);
+                        break;
+                    } catch (Exception ignored) {}
+                }
+            }
+            if (setBlockMethod != null) setBlockMethod.invoke(world, x, y, z, id);
         } catch (Exception e) { /* skip */ }
     }
 
@@ -251,33 +331,38 @@ public class VeinMiner {
         } catch (Exception e) { return null; }
     }
 
+    // EntityPlayer.canHarvestBlock(Block): scans by parameter count
     private static Method canHarvestMethod = null;
     private static boolean invokeCanHarvest(Object player, Object block) {
         try {
-            if (canHarvestMethod == null)
-                canHarvestMethod = player.getClass().getMethod("canHarvestBlock", block.getClass().getSuperclass());
-            return (Boolean) canHarvestMethod.invoke(player, block);
-        } catch (Exception e) {
-            // try with exact class
-            try {
+            if (canHarvestMethod == null) {
                 for (Method m : player.getClass().getMethods()) {
-                    if (m.getName().equals("canHarvestBlock") && m.getParameterTypes().length == 1) {
-                        canHarvestMethod = m;
-                        return (Boolean) m.invoke(player, block);
+                    if (m.getParameterTypes().length == 1 &&
+                        (m.getName().equals("canHarvestBlock") || m.getName().length() == 1)) {
+                        // verify it returns boolean and takes a Block-like type
+                        if (m.getReturnType() == boolean.class || m.getReturnType() == Boolean.class) {
+                            try {
+                                m.invoke(player, block);
+                                canHarvestMethod = m;
+                                break;
+                            } catch (Exception ignored) {}
+                        }
                     }
                 }
-            } catch (Exception e2) { /* skip */ }
-            return true;
-        }
+            }
+            if (canHarvestMethod != null) return (Boolean) canHarvestMethod.invoke(player, block);
+        } catch (Exception ignored) {}
+        return true;
     }
 
+    // Block.harvestBlock(World, EntityPlayer, III, int): 6 params
     private static Method harvestBlockMethod = null;
     private static void invokeHarvestBlock(Object block, Object world, Object player,
                                             int x, int y, int z, int meta) {
         try {
             if (harvestBlockMethod == null) {
                 for (Method m : block.getClass().getMethods()) {
-                    if (m.getName().equals("harvestBlock") && m.getParameterTypes().length == 6) {
+                    if (m.getParameterTypes().length == 6) {
                         harvestBlockMethod = m;
                         break;
                     }
@@ -288,27 +373,31 @@ public class VeinMiner {
         } catch (Exception e) { /* skip */ }
     }
 
+    // ItemStack.damageItem(int, EntityLiving): 2 params, first is int
     private static Method damageItemMethod = null;
     private static void damageItemReflect(Object stack, int amount, Object player) {
         try {
             if (damageItemMethod == null) {
                 for (Method m : stack.getClass().getMethods()) {
-                    if (m.getName().equals("damageItem") && m.getParameterTypes().length == 2
-                            && m.getParameterTypes()[0] == int.class) {
+                    if (m.getParameterTypes().length == 2 && m.getParameterTypes()[0] == int.class) {
                         damageItemMethod = m;
                         break;
                     }
                 }
             }
-            if (damageItemMethod != null)
-                damageItemMethod.invoke(stack, amount, player);
+            if (damageItemMethod != null) damageItemMethod.invoke(stack, amount, player);
         } catch (Exception e) { /* skip */ }
     }
 
     private static boolean isItemStackDamageable(Object stack) {
         try {
-            return (Boolean) stack.getClass().getMethod("isItemStackDamageable").invoke(stack);
-        } catch (Exception e) { return false; }
+            for (String n : new String[]{"isItemStackDamageable", "q"}) {
+                try {
+                    return (Boolean) stack.getClass().getMethod(n).invoke(stack);
+                } catch (Exception ignored) {}
+            }
+        } catch (Exception ignored) {}
+        return false;
     }
 
     private static Field captureDropsField = null;
@@ -335,12 +424,14 @@ public class VeinMiner {
         if (drops != null) drops.clear();
     }
 
+    // EntityItem.getEntityItem(): no-arg, returns ItemStack
     private static Method getEntityItemMethod = null;
     private static Object getEntityItemStack(Object entityItem) {
         try {
             if (getEntityItemMethod == null) {
                 for (Method m : entityItem.getClass().getMethods()) {
-                    if (m.getName().equals("getEntityItem") && m.getParameterTypes().length == 0) {
+                    if (m.getParameterTypes().length == 0 &&
+                        (m.getName().equals("getEntityItem") || m.getName().equals("c"))) {
                         getEntityItemMethod = m;
                         break;
                     }
@@ -350,60 +441,63 @@ public class VeinMiner {
         } catch (Exception e) { return null; }
     }
 
+    // InventoryPlayer.addItemStackToInventory(ItemStack)
     private static Method addToInventoryMethod = null;
     private static boolean addToInventory(Object player, Object stack) {
         try {
-            Object inventory = getField(player, "inventory");
+            // inventory field: MCP="inventory", obf="bJ"
+            Object inventory = getFieldByNames(player, "inventory", "bJ");
             if (inventory == null) return false;
-            if (addToInventoryMethod == null)
-                addToInventoryMethod = inventory.getClass().getMethod("addItemStackToInventory", stack.getClass());
+            if (addToInventoryMethod == null) {
+                for (String n : new String[]{"addItemStackToInventory", "a"}) {
+                    try {
+                        addToInventoryMethod = inventory.getClass().getMethod(n, stack.getClass());
+                        break;
+                    } catch (Exception ignored) {}
+                }
+            }
+            if (addToInventoryMethod == null) return false;
             return (Boolean) addToInventoryMethod.invoke(inventory, stack);
         } catch (Exception e) { return false; }
     }
 
+    // World.spawnEntityInWorld(Entity): MCP="spawnEntityInWorld", obf="d"
     private static Constructor<?> entityItemCtor = null;
     private static Method spawnEntityMethod = null;
     private static void spawnItemReflect(Object world, double x, double y, double z, Object stack) {
         try {
             if (entityItemCtor == null) {
                 Class<?> eiClass = Class.forName("net.minecraft.entity.item.EntityItem");
-                entityItemCtor = eiClass.getConstructor(
-                        world.getClass().getSuperclass(), // World
-                        double.class, double.class, double.class,
-                        stack.getClass()); // ItemStack
+                // Walk up to find World superclass for constructor
+                Class<?> worldClass = world.getClass();
+                while (worldClass != null) {
+                    try {
+                        entityItemCtor = eiClass.getConstructor(
+                                worldClass, double.class, double.class, double.class, stack.getClass());
+                        break;
+                    } catch (Exception ignored) { worldClass = worldClass.getSuperclass(); }
+                }
             }
+            if (entityItemCtor == null) return;
             Object ei = entityItemCtor.newInstance(world, x, y, z, stack);
             if (spawnEntityMethod == null) {
-                for (Method m : world.getClass().getMethods()) {
-                    if (m.getName().equals("spawnEntityInWorld") && m.getParameterTypes().length == 1) {
-                        spawnEntityMethod = m;
+                for (String n : new String[]{"spawnEntityInWorld", "d"}) {
+                    try {
+                        spawnEntityMethod = world.getClass().getMethod(n, ei.getClass().getSuperclass().getSuperclass());
                         break;
+                    } catch (Exception ignored) {}
+                }
+                if (spawnEntityMethod == null) {
+                    for (Method m : world.getClass().getMethods()) {
+                        if (m.getParameterTypes().length == 1 &&
+                            (m.getName().equals("spawnEntityInWorld") || m.getName().equals("d"))) {
+                            spawnEntityMethod = m; break;
+                        }
                     }
                 }
             }
-            if (spawnEntityMethod != null)
-                spawnEntityMethod.invoke(world, ei);
+            if (spawnEntityMethod != null) spawnEntityMethod.invoke(world, ei);
         } catch (Exception e) { /* skip */ }
-    }
-
-    // Generic reflection utilities
-
-    private static Object invoke(Object obj, String method) {
-        try {
-            return obj.getClass().getMethod(method).invoke(obj);
-        } catch (Exception e) { return null; }
-    }
-
-    private static Object invoke(Object obj, String method, Class<?> argType, Object arg) {
-        try {
-            return obj.getClass().getMethod(method, argType).invoke(obj, arg);
-        } catch (Exception e) { return null; }
-    }
-
-    private static int invokeInt(Object obj, String method) {
-        try {
-            return (Integer) obj.getClass().getMethod(method).invoke(obj);
-        } catch (Exception e) { return 0; }
     }
 
     private static Object getField(Object obj, String name) {
@@ -413,19 +507,13 @@ public class VeinMiner {
         } catch (Exception e) { return null; }
     }
 
-    private static boolean getBoolean(Object obj, String name) {
-        try {
-            return obj.getClass().getField(name).getBoolean(obj);
-        } catch (Exception e) { return false; }
-    }
-
-    private static int getInt(Object obj, String name) {
+    private static int getIntField(Object obj, String name) {
         try {
             return obj.getClass().getField(name).getInt(obj);
         } catch (Exception e) { return 0; }
     }
 
-    private static double getDouble(Object obj, String name) {
+    private static double getDoubleField(Object obj, String name) {
         try {
             return obj.getClass().getField(name).getDouble(obj);
         } catch (Exception e) { return 0.0; }
