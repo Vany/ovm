@@ -2,46 +2,33 @@ package com.ovm;
 
 import java.util.EnumSet;
 
-import net.minecraft.client.settings.KeyBinding;
+import org.lwjgl.input.Keyboard;
 
-import cpw.mods.fml.client.registry.KeyBindingRegistry;
+import cpw.mods.fml.common.ITickHandler;
 import cpw.mods.fml.common.TickType;
 import cpw.mods.fml.relauncher.Side;
 import cpw.mods.fml.relauncher.SideOnly;
 
 /**
- * Client-side key handler for the veinmine modifier key.
- * Does NOT import PacketDispatcher or any Packet class — those have
- * net.minecraft.network.packet.Packet in their signatures which is
- * obfuscated at runtime and causes NoClassDefFoundError on class load.
- * Packet sending is delegated to OvmKeyPacket which uses reflection.
+ * Client-side key poller for the veinmine modifier key.
+ * Uses LWJGL Keyboard directly — avoids KeyBinding and KeyBindingRegistry
+ * which reference obfuscated net.minecraft.client.settings.KeyBinding at runtime.
  */
 @SideOnly(Side.CLIENT)
-public class OvmKeyHandler extends KeyBindingRegistry.KeyHandler {
+public class OvmKeyHandler implements ITickHandler {
 
-    public static KeyBinding keyVeinMine;
-
-    public OvmKeyHandler() {
-        super(
-            new KeyBinding[]{ buildKeyBinding() },
-            new boolean[]{ false }  // no repeat
-        );
-    }
-
-    private static KeyBinding buildKeyBinding() {
-        keyVeinMine = new KeyBinding("key.ovm.veinmine", OvmConfig.activationKey);
-        return keyVeinMine;
-    }
+    private boolean prevKeyDown = false;
 
     @Override
-    public void keyDown(EnumSet<TickType> types, KeyBinding kb, boolean tickEnd, boolean isRepeat) {
-        if (isRepeat) return;
-        OvmKeyPacket.send(true);
-    }
+    public void tickStart(EnumSet<TickType> type, Object... tickData) {}
 
     @Override
-    public void keyUp(EnumSet<TickType> types, KeyBinding kb, boolean tickEnd) {
-        OvmKeyPacket.send(false);
+    public void tickEnd(EnumSet<TickType> type, Object... tickData) {
+        boolean keyDown = Keyboard.isKeyDown(OvmConfig.activationKey);
+        if (keyDown != prevKeyDown) {
+            prevKeyDown = keyDown;
+            OvmKeyPacket.send(keyDown);
+        }
     }
 
     @Override

@@ -15,7 +15,6 @@ import cpw.mods.fml.common.registry.TickRegistry;
 import cpw.mods.fml.relauncher.Side;
 import cpw.mods.fml.relauncher.SideOnly;
 import net.minecraft.client.Minecraft;
-import net.minecraft.client.settings.KeyBinding;
 import net.minecraftforge.common.MinecraftForge;
 import java.lang.reflect.Field;
 import java.lang.reflect.InvocationHandler;
@@ -77,7 +76,7 @@ public class OvmMod {
 
     @SideOnly(Side.CLIENT)
     private void initClient() {
-        cpw.mods.fml.client.registry.KeyBindingRegistry.registerKeyBinding(new OvmKeyHandler());
+        TickRegistry.registerTickHandler(new OvmKeyHandler(), Side.CLIENT);
         TickRegistry.registerTickHandler(new VersionChatHandler(), Side.CLIENT);
     }
 
