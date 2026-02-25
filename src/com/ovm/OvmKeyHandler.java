@@ -24,10 +24,16 @@ public class OvmKeyHandler implements ITickHandler {
 
     @Override
     public void tickEnd(EnumSet<TickType> type, Object... tickData) {
-        boolean keyDown = Keyboard.isKeyDown(OvmConfig.activationKey);
-        if (keyDown != prevKeyDown) {
-            prevKeyDown = keyDown;
-            OvmKeyPacket.send(keyDown);
+        try {
+            if (!Keyboard.isCreated()) return;
+            // Scan all key codes to find what ` actually reports on this system
+            for (int i = 0; i < 256; i++) {
+                if (Keyboard.isKeyDown(i)) {
+                    System.out.println("[OVM] Key down: code=" + i + " name=" + Keyboard.getKeyName(i));
+                }
+            }
+        } catch (Exception e) {
+            System.out.println("[OVM] KeyHandler error: " + e);
         }
     }
 

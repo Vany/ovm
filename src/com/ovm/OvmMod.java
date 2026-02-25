@@ -10,16 +10,13 @@ import cpw.mods.fml.common.event.FMLPostInitializationEvent;
 import cpw.mods.fml.common.event.FMLPreInitializationEvent;
 import cpw.mods.fml.common.ITickHandler;
 import cpw.mods.fml.common.TickType;
-import cpw.mods.fml.common.network.NetworkRegistry;
 import cpw.mods.fml.common.registry.TickRegistry;
 import cpw.mods.fml.relauncher.Side;
 import cpw.mods.fml.relauncher.SideOnly;
 import net.minecraft.client.Minecraft;
 import net.minecraftforge.common.MinecraftForge;
 import java.lang.reflect.Field;
-import java.lang.reflect.InvocationHandler;
 import java.lang.reflect.Method;
-import java.lang.reflect.Proxy;
 import java.util.EnumSet;
 
 @Mod(modid = OvmMod.MODID, name = OvmMod.NAME, version = OvmMod.VERSION)
@@ -41,34 +38,10 @@ public class OvmMod {
     public void init(FMLInitializationEvent event) {
         System.out.println("[OVM] Init");
 
-        // Register server-side packet handler via dynamic proxy.
-        // We cannot use "new OvmPacketHandler()" directly because IPacketHandler's
-        // onPacketData(INetworkManager, Packet250CustomPayload, Player) signature
-        // references Packet250CustomPayload whose superclass Packet is obfuscated at runtime.
-        try {
-            Class<?> iph = Class.forName("cpw.mods.fml.common.network.IPacketHandler");
-            Object proxy = Proxy.newProxyInstance(
-                OvmMod.class.getClassLoader(),
-                new Class<?>[]{iph},
-                new InvocationHandler() {
-                    public Object invoke(Object proxy, Method method, Object[] args) {
-                        if ("onPacketData".equals(method.getName()) && args != null && args.length == 3) {
-                            OvmPacketHandler.handlePacketData(args[1], args[2]);
-                        }
-                        return null;
-                    }
-                }
-            );
-            NetworkRegistry.instance().registerChannel(
-                (cpw.mods.fml.common.network.IPacketHandler) proxy, OvmKeyPacket.CHANNEL);
-        } catch (Exception e) {
-            System.out.println("[OVM] Failed to register packet handler: " + e);
-        }
-
         // Register server-side VeinMiner event listener
         MinecraftForge.EVENT_BUS.register(new VeinMiner());
 
-        // Client-side: register key binding handler and version chat message
+        // Client-side: version chat message
         if (event.getSide().isClient()) {
             initClient();
         }
@@ -76,7 +49,6 @@ public class OvmMod {
 
     @SideOnly(Side.CLIENT)
     private void initClient() {
-        TickRegistry.registerTickHandler(new OvmKeyHandler(), Side.CLIENT);
         TickRegistry.registerTickHandler(new VersionChatHandler(), Side.CLIENT);
     }
 
@@ -102,10 +74,9 @@ public class OvmMod {
                 Object world = getField(mc, new String[]{"theWorld", "e"});
                 Object player = getField(mc, new String[]{"thePlayer", "g"});
                 if (world == null || player == null) return;
-                // addChatMessage(String) — try both obfuscated and deobfuscated names
                 for (String name : new String[]{"addChatMessage", "a"}) {
                     try {
-                        player.getClass().getMethod(name, String.class).invoke(player, NAME + " " + VERSION + " loaded.");
+                        player.getClass().getMethod(name, String.class).invoke(player, NAME + " " + VERSION + " loaded. Sneak + left-click to veinmine.");
                         break;
                     } catch (Exception e) { /* try next */ }
                 }

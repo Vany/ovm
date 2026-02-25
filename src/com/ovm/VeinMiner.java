@@ -76,8 +76,9 @@ public class VeinMiner {
             boolean isRemote = getBoolean(world, "isRemote");
             if (isRemote) return;
 
-            if (!(player instanceof net.minecraft.entity.player.EntityPlayer)) return;
-            if (!OvmPacketHandler.isVeinKeyActive((net.minecraft.entity.player.EntityPlayer) player)) return;
+            // Use sneak state as the veinmine modifier — checked server-side, no packet needed.
+            boolean sneaking = (Boolean) player.getClass().getMethod("isSneaking").invoke(player);
+            if (!sneaking) return;
 
             int ox = event.x, oy = event.y, oz = event.z;
             int originId = invokeGetBlockId(world, ox, oy, oz);

@@ -14,8 +14,6 @@ public class OvmConfig {
     public static int maxBlocks       = 64;
     public static int hungerPerBlocks = 32;
     public static boolean dropsToInventory = true;
-    public static int activationKey   = 41; // LWJGL KEY_GRAVE = 41 (the ` key)
-
     public static void load(File configDir) {
         Configuration cfg = new Configuration(new File(configDir, "ovm.cfg"));
         try {
@@ -42,14 +40,7 @@ public class OvmConfig {
                 "If true, mined drops go to player inventory (overflow drops at feet). If false, drop in place."
             ).getBoolean(true);
 
-            activationKey = cfg.get(
-                Configuration.CATEGORY_GENERAL,
-                "activationKey",
-                41,
-                "LWJGL keycode for the veinmine modifier key (default: 41 = grave/backtick `)"
-            ).getInt(41);
-
-        } finally {
+} finally {
             cfg.save();
         }
     }
