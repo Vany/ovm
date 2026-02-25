@@ -53,7 +53,6 @@ public class OvmPacketHandler implements IPacketHandler {
 
     /** Extract data from packet and call VeinMiner. Works with obfuscated or MCP types. */
     private static void handlePacket(Object packet, Object player) {
-        System.out.println("[OVM] handlePacket called packet=" + (packet == null ? "null" : packet.getClass().getName()) + " player=" + (player == null ? "null" : player.getClass().getName()));
         try {
             // Read channel field: MCP="channel", obf="a"
             String channel = null;
@@ -61,11 +60,7 @@ public class OvmPacketHandler implements IPacketHandler {
                 try { channel = (String) packet.getClass().getField(fname).get(packet); if (channel != null) break; }
                 catch (Exception ignored) {}
             }
-            System.out.println("[OVM] packet channel=" + channel);
-            if (!OvmMod.CHANNEL.equals(channel)) {
-                System.out.println("[OVM] channel mismatch, expected=" + OvmMod.CHANNEL);
-                return;
-            }
+            if (!OvmMod.CHANNEL.equals(channel)) return;
 
             // Read data field: MCP="data", obf="c"
             byte[] data = null;
@@ -73,15 +68,13 @@ public class OvmPacketHandler implements IPacketHandler {
                 try { Object v = packet.getClass().getField(fname).get(packet); if (v instanceof byte[]) { data = (byte[]) v; break; } }
                 catch (Exception ignored) {}
             }
-            System.out.println("[OVM] packet data=" + (data == null ? "null" : data.length + " bytes"));
-            if (data == null) { System.out.println("[OVM] data is null"); return; }
+            if (data == null) return;
 
             DataInputStream in = new DataInputStream(new ByteArrayInputStream(data));
             int x = in.readInt();
             int y = in.readInt();
             int z = in.readInt();
             int originBlockId = (data.length >= 16) ? in.readInt() : 0;
-            System.out.println("[OVM] Packet received x=" + x + " y=" + y + " z=" + z + " originBlockId=" + originBlockId + " player=" + player.getClass().getName());
             VeinMiner.veinmine((Player) player, x, y, z, originBlockId);
         } catch (Exception e) {
             System.out.println("[OVM] Packet error: " + e);

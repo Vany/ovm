@@ -36,10 +36,25 @@ public class OvmClientHandler {
             return;
         }
 
-        pendingX = event.x;
-        pendingY = event.y;
-        pendingZ = event.z;
-        pendingBlockId = 0;
+        if (event.x != pendingX || event.y != pendingY || event.z != pendingZ) {
+            // New block targeted — capture its id immediately and send.
+            // This handles both normal breaks (onTick will see air and send) and
+            // instant-break tools where the block may not become air between ticks.
+            Object mc = getMc();
+            Object world = mc != null ? getField(mc, "theWorld", "e") : null;
+            int bid = world != null ? invokeGetBlockId(world, event.x, event.y, event.z) : 0;
+            pendingX = event.x;
+            pendingY = event.y;
+            pendingZ = event.z;
+            pendingBlockId = bid;
+            if (bid != 0) {
+                // Instant-break path: send now, disable onTick to avoid double-send.
+                pendingX = Integer.MIN_VALUE;
+                pendingBlockId = 0;
+                System.out.println("[OVM] client: block broke id=" + bid + ", sending packet (" + event.x + "," + event.y + "," + event.z + ")");
+                sendPacket(event.x, event.y, event.z, bid);
+            }
+        }
         System.out.println("[OVM] client: pending veinmine set (" + pendingX + "," + pendingY + "," + pendingZ + ")");
     }
 
@@ -65,6 +80,7 @@ public class OvmClientHandler {
         Object world = getField(mc, "theWorld", "e");
         if (world == null) return;
 
+        // Fallback for cases where onPlayerInteract fired before the world was ready.
         int blockId = invokeGetBlockId(world, pendingX, pendingY, pendingZ);
         if (blockId != 0) {
             pendingBlockId = blockId;
@@ -75,6 +91,8 @@ public class OvmClientHandler {
             System.out.println("[OVM] client: block broke id=" + bid + ", sending packet (" + x + "," + y + "," + z + ")");
             sendPacket(x, y, z, bid);
         }
+        // else: block is already air and pendingBlockId is 0 — nothing to do, clear pending
+        else { pendingX = Integer.MIN_VALUE; }
     }
 
     /**

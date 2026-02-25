@@ -6,264 +6,121 @@ import java.lang.reflect.Field;
 import java.lang.reflect.Method;
 import java.util.ArrayList;
 import java.util.Comparator;
+import java.util.HashMap;
 import java.util.HashSet;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.PriorityQueue;
+import java.util.Random;
 import java.util.Set;
 
 /**
- * VeinMiner v0.3.0 — server-side chain-mine with priority flood fill.
- *
+ * Server-side chain-mine with priority flood fill.
  * Called from OvmPacketHandler when the client sends a veinmine request.
- * All Minecraft types accessed via reflection to avoid NoClassDefFoundError.
- *
- * Obfuscated names sourced from forge/conf/packaged.srg (1.4.7-6.6.2.534).
- * Each helper tries the MCP name first, then the obfuscated name.
+ * All Minecraft types accessed via reflection (FML does not remap mod code).
+ * Obfuscated names from forge/conf/packaged.srg (1.4.7-6.6.2.534).
  */
 public class VeinMiner {
 
     // 26-neighbor offsets (full 3x3x3 minus center)
     private static final int[][] NEIGHBORS = new int[26][3];
-
     static {
         int idx = 0;
-        for (int dx = -1; dx <= 1; dx++) for (int dy = -1; dy <= 1; dy++) for (
-            int dz = -1;
-            dz <= 1;
-            dz++
-        ) if (dx != 0 || dy != 0 || dz != 0) NEIGHBORS[idx++] = new int[] {
-            dx,
-            dy,
-            dz,
-        };
+        for (int dx = -1; dx <= 1; dx++)
+            for (int dy = -1; dy <= 1; dy++)
+                for (int dz = -1; dz <= 1; dz++)
+                    if (dx != 0 || dy != 0 || dz != 0)
+                        NEIGHBORS[idx++] = new int[]{ dx, dy, dz };
+    }
+
+    private static final Random RAND = new Random();
+
+    // Block id pairs that should be treated as the same vein target.
+    // e.g. redstone ore (73) activates to lit redstone ore (74) on touch.
+    private static final int[][] EQUIVALENT_IDS = { { 73, 74 } };
+
+    /** Normalize a block id to its canonical vein id (e.g. 74 → 73). */
+    private static int canonicalId(int id) {
+        for (int[] pair : EQUIVALENT_IDS)
+            if (id == pair[1]) return pair[0];
+        return id;
+    }
+
+    /** Return true if blockId belongs to the same vein as targetId. */
+    private static boolean matchesTarget(int blockId, int targetId) {
+        if (blockId == targetId) return true;
+        for (int[] pair : EQUIVALENT_IDS)
+            if (pair[0] == targetId && blockId == pair[1]) return true;
+        return false;
     }
 
     // -----------------------------------------------------------------------
-    // Entry point called by OvmPacketHandler
+    // Entry point
     // -----------------------------------------------------------------------
 
-    public static void veinmine(
-        Player playerArg,
-        int ox,
-        int oy,
-        int oz,
-        int hintBlockId
-    ) {
-        System.out.println(
-            "[OVM] veinmine called ox=" +
-                ox +
-                " oy=" +
-                oy +
-                " oz=" +
-                oz +
-                " hintBlockId=" +
-                hintBlockId +
-                " player=" +
-                (playerArg == null ? "null" : playerArg.getClass().getName())
-        );
+    public static void veinmine(Player playerArg, int ox, int oy, int oz, int hintBlockId) {
         try {
             Object player = playerArg;
+            Object world = getField(player, Object.class, "worldObj", "p");
+            if (world == null || getField(world, boolean.class, "isRemote", "I")) return;
 
-            // worldObj field: MCP="worldObj", obf="p"  (Entity.field_70170_p)
-            Object world = getFieldByNames(player, "worldObj", "p");
-            if (world == null) {
-                System.out.println("[OVM] veinmine: world is null");
+            int originId = canonicalId(invokeGetBlockId(world, ox, oy, oz));
+            if (originId == 0) originId = canonicalId(hintBlockId); // client already broke it
+            if (originId == 0) return;
+
+            Object foodStats = invokeNoArg(player, Object.class, "getFoodStats", "cc");
+            if (foodStats == null) return;
+            if (invokeNoArg(foodStats, int.class, "getFoodLevel", "a") < 1) {
+                invokeWithStringArg(player, "addChatMessage", "[OVM] Not enough food to veinmine.");
                 return;
             }
 
-            // Must be server-side
-            boolean isRemote = getBooleanByNames(world, "isRemote", "I");
-            System.out.println(
-                "[OVM] veinmine: world=" +
-                    world.getClass().getSimpleName() +
-                    " isRemote=" +
-                    isRemote
-            );
-            if (isRemote) {
-                System.out.println("[OVM] veinmine: skipped (isRemote=true)");
-                return;
-            }
-
-            int originId = invokeGetBlockId(world, ox, oy, oz);
-            // Client already broke the origin block — use the hint ID sent in the packet
-            if (originId == 0 && hintBlockId != 0) {
-                System.out.println(
-                    "[OVM] veinmine: origin is air, using hintBlockId=" +
-                        hintBlockId
-                );
-                originId = hintBlockId;
-            }
-            System.out.println(
-                "[OVM] veinmine: originId=" +
-                    originId +
-                    " at (" +
-                    ox +
-                    "," +
-                    oy +
-                    "," +
-                    oz +
-                    ")"
-            );
-            if (originId == 0) {
-                System.out.println(
-                    "[OVM] veinmine: origin is air and no hint, abort"
-                );
-                return;
-            }
-
-            // Log held item at start of veinmine
-            Object heldAtStart = getHeldItem(player);
-            if (heldAtStart == null) {
-                System.out.println("[OVM] veinmine: heldItem=null (bare hands)");
-            } else {
-                int heldId  = getStackItemId(heldAtStart);
-                int heldDmg = getStackDamage(heldAtStart);
-                int heldMax = getStackMaxDamage(heldAtStart);
-                System.out.println("[OVM] veinmine: heldItem id=" + heldId + " dmg=" + heldDmg + "/" + heldMax);
-            }
-
-            // Hunger check
-            Object foodStats = invokeByNames(player, "getFoodStats", "cc");
-            System.out.println(
-                "[OVM] veinmine: foodStats=" +
-                    (foodStats == null
-                        ? "null"
-                        : foodStats.getClass().getSimpleName())
-            );
-            if (foodStats == null) {
-                System.out.println("[OVM] veinmine: foodStats null, abort");
-                return;
-            }
-            int foodLevel = invokeIntByNames(foodStats, "getFoodLevel", "a");
-            System.out.println("[OVM] veinmine: foodLevel=" + foodLevel);
-            if (foodLevel < 1) {
-                invokeWithStringArg(
-                    player,
-                    "addChatMessage",
-                    "[OVM] Not enough food to veinmine."
-                );
-                return;
-            }
-
-            // Require correct tool for the origin block before proceeding
             Object originBlock = getBlockFromArray(originId);
             if (originBlock != null && !invokeCanHarvest(player, originBlock)) {
-                System.out.println("[OVM] veinmine: wrong tool for origin block, abort");
+                System.out.println("[OVM] veinmine: canHarvest=false for originId=" + originId + ", abort");
                 return;
             }
 
-            List<int[]> vein = buildVein(
-                world,
-                ox,
-                oy,
-                oz,
-                originId,
-                OvmConfig.maxBlocks
-            );
-            System.out.println("[OVM] veinmine: vein size=" + vein.size());
-            if (vein.isEmpty()) {
-                System.out.println("[OVM] veinmine: vein empty, abort");
-                return;
-            }
+            List<int[]> vein = buildVein(world, ox, oy, oz, originId, OvmConfig.maxBlocks);
+            System.out.println("[OVM] veinmine: originId=" + originId + " vein=" + vein.size());
+            if (vein.isEmpty()) return;
 
-            // Collect drops manually: key=(itemId<<16|damage) -> [itemId, damage, totalCount]
-            java.util.LinkedHashMap<Integer, int[]> mergedDrops =
-                new java.util.LinkedHashMap<Integer, int[]>();
-
+            LinkedHashMap<Integer, int[]> drops = new LinkedHashMap<Integer, int[]>();
             int minedCount = 0;
-            for (int[] pos : vein) {
-                int bx = pos[0],
-                    by = pos[1],
-                    bz = pos[2];
-                int blockId = invokeGetBlockId(world, bx, by, bz);
-                if (blockId != originId) continue;
 
-                Object block = getBlockFromArray(blockId);
-                if (block == null) {
-                    System.out.println(
-                        "[OVM] veinmine: block null for id=" + blockId + " skip"
-                    );
-                    continue;
-                }
-                boolean canHarvest = invokeCanHarvest(player, block);
-                System.out.println(
-                    "[OVM] veinmine: (" +
-                        bx +
-                        "," +
-                        by +
-                        "," +
-                        bz +
-                        ") id=" +
-                        blockId +
-                        " block=" +
-                        block.getClass().getSimpleName() +
-                        " canHarvest=" +
-                        canHarvest
-                );
-                if (!canHarvest) continue;
+            for (int[] pos : vein) {
+                int bx = pos[0], by = pos[1], bz = pos[2];
+                int actualId = invokeGetBlockId(world, bx, by, bz);
+                if (!matchesTarget(actualId, originId)) continue;
+
+                Object block = getBlockFromArray(actualId);
+                if (block == null || !invokeCanHarvest(player, block)) continue;
 
                 int meta = invokeGetBlockMeta(world, bx, by, bz);
-                // Collect drops from this block before removing it
-                collectBlockDrops(
-                    block,
-                    world,
-                    player,
-                    bx,
-                    by,
-                    bz,
-                    meta,
-                    mergedDrops
-                );
+                boolean harvested = invokeHarvestBlock(block, world, player, bx, by, bz, meta);
+                if (!harvested) collectBlockDrops(block, meta, drops);
                 invokeSetBlock(world, bx, by, bz, 0);
                 minedCount++;
 
-                // Damage tool (1 durability per block, same as vanilla)
                 Object held = getHeldItem(player);
-                if (held == null) {
-                    System.out.println("[OVM] durability: held=null at block " + minedCount);
-                } else if (!isItemStackDamageable(held)) {
-                    System.out.println("[OVM] durability: item not damageable (id=" + getStackItemId(held) + ")");
-                } else {
-                    int dmgBefore = getStackDamage(held);
-                    int sizeBefore = getStackSize(held);
+                if (held != null && isItemStackDamageable(held)) {
                     damageItemReflect(held, 1, player);
-                    int dmgAfter = getStackDamage(held);
-                    int sizeAfter = getStackSize(held);
-                    System.out.println("[OVM] durability: block=" + minedCount
-                        + " dmg " + dmgBefore + "->" + dmgAfter
-                        + " stackSize " + sizeBefore + "->" + sizeAfter);
-                    if (sizeAfter <= 0) {
-                        System.out.println("[OVM] durability: tool broke, stopping");
+                    if (getStackSize(held) <= 0) {
+                        System.out.println("[OVM] tool broke at block " + minedCount);
                         break;
                     }
                 }
             }
 
-            deliverMergedDrops(world, player, mergedDrops);
+            deliverDrops(world, player, drops);
 
             if (OvmConfig.hungerPerBlocks > 0 && minedCount > 0) {
                 int pts = minedCount / OvmConfig.hungerPerBlocks;
-                if (pts > 0) {
-                    invokeFloatByNames(
-                        foodStats,
-                        "addExhaustion",
-                        "a",
-                        4.0f * pts
-                    );
-                }
+                if (pts > 0) invokeWithFloatArg(foodStats, "addExhaustion", "a", 4.0f * pts);
             }
 
-            System.out.println(
-                "[OVM] Veinmined " +
-                    minedCount +
-                    " blocks at (" +
-                    ox +
-                    "," +
-                    oy +
-                    "," +
-                    oz +
-                    ")"
-            );
+            System.out.println("[OVM] Veinmined " + minedCount + " blocks at (" + ox + "," + oy + "," + oz + ")");
         } catch (Exception e) {
             System.out.println("[OVM] VeinMiner error: " + e);
             e.printStackTrace();
@@ -274,59 +131,38 @@ public class VeinMiner {
     // Priority flood fill
     // -----------------------------------------------------------------------
 
-    private static List<int[]> buildVein(
-        Object world,
-        int ox,
-        int oy,
-        int oz,
-        int targetId,
-        int maxCount
-    ) {
+    private static final class PQEntry {
+        final long dist;
+        final int x, y, z;
+        PQEntry(long dist, int x, int y, int z) { this.dist = dist; this.x = x; this.y = y; this.z = z; }
+    }
+
+    private static List<int[]> buildVein(Object world, int ox, int oy, int oz, int targetId, int maxCount) {
         List<int[]> result = new ArrayList<int[]>();
-        PriorityQueue<long[]> pq = new PriorityQueue<long[]>(
-            16,
-            new Comparator<long[]>() {
-                public int compare(long[] a, long[] b) {
-                    return Long.compare(a[0], b[0]);
-                }
-            }
-        );
+        PriorityQueue<PQEntry> pq = new PriorityQueue<PQEntry>(16, new Comparator<PQEntry>() {
+            public int compare(PQEntry a, PQEntry b) { return Long.compare(a.dist, b.dist); }
+        });
         Set<Long> visited = new HashSet<Long>();
 
         visited.add(coordKey(ox, oy, oz));
-        pq.add(new long[] { 0L, ox, oy, oz });
+        pq.add(new PQEntry(0L, ox, oy, oz));
 
         while (!pq.isEmpty() && result.size() < maxCount) {
-            long[] e = pq.poll();
-            int bx = (int) e[1],
-                by = (int) e[2],
-                bz = (int) e[3];
+            PQEntry e = pq.poll();
+            int bx = e.x, by = e.y, bz = e.z;
             int bid = invokeGetBlockId(world, bx, by, bz);
-            // Accept the block if it matches targetId, OR if it's the origin (already air — client mined it)
             boolean isOrigin = (bx == ox && by == oy && bz == oz);
-            if (bid != targetId && !isOrigin) continue;
-            if (bid == targetId) result.add(new int[] { bx, by, bz }); // don't add air origin to result
+            if (!matchesTarget(bid, targetId) && !isOrigin) continue;
+            if (matchesTarget(bid, targetId)) result.add(new int[]{ bx, by, bz });
             for (int[] d : NEIGHBORS) {
-                int nx = bx + d[0],
-                    ny = by + d[1],
-                    nz = bz + d[2];
+                int nx = bx + d[0], ny = by + d[1], nz = bz + d[2];
                 long nk = coordKey(nx, ny, nz);
-                if (
-                    !visited.contains(nk) &&
-                    invokeGetBlockId(world, nx, ny, nz) == targetId
-                ) {
+                if (!visited.contains(nk)) {
                     visited.add(nk);
-                    long ddx = nx - ox,
-                        ddy = ny - oy,
-                        ddz = nz - oz;
-                    pq.add(
-                        new long[] {
-                            ddx * ddx + ddy * ddy + ddz * ddz,
-                            nx,
-                            ny,
-                            nz,
-                        }
-                    );
+                    if (matchesTarget(invokeGetBlockId(world, nx, ny, nz), targetId)) {
+                        long ddx = nx - ox, ddy = ny - oy, ddz = nz - oz;
+                        pq.add(new PQEntry(ddx * ddx + ddy * ddy + ddz * ddz, nx, ny, nz));
+                    }
                 }
             }
         }
@@ -334,123 +170,84 @@ public class VeinMiner {
     }
 
     // -----------------------------------------------------------------------
-    // Drop collection and delivery
+    // Drop collection
     // -----------------------------------------------------------------------
 
-    // Per-class method caches for block drop methods (keyed by block class name)
-    // [0]=idDropped, [1]=quantityDropped, [2]=damageDropped
-    private static final java.util.HashMap<String, Method[]> blockDropMethodCache =
-        new java.util.HashMap<String, Method[]>();
+    // harvestBlock(World, EntityPlayer, int, int, int, int) — vanilla handles special drops (shears, etc.)
+    // Returns true if called successfully (vanilla spawned drops), false if not found (use collectBlockDrops).
+    private static final HashMap<String, Method> harvestBlockMethodCache = new HashMap<String, Method>();
 
-    private static final java.util.Random RAND = new java.util.Random();
-
-    private static void collectBlockDrops(
-        Object block,
-        Object world,
-        Object player,
-        int x,
-        int y,
-        int z,
-        int meta,
-        java.util.LinkedHashMap<Integer, int[]> merged
-    ) {
-        try {
-            String blockClassName = block.getClass().getName();
-            System.out.println("[OVM] collectBlockDrops: block=" + blockClassName + " meta=" + meta);
-
-            // Resolve block drop methods per class
-            Method[] dropMethods = blockDropMethodCache.get(blockClassName);
-            if (dropMethods == null) {
-                dropMethods = new Method[3]; // [0]=idDropped, [1]=quantityDropped, [2]=damageDropped
-                // idDropped: MCP="idDropped", obf="a" — signature (int,Random,int)->int (unique)
-                // quantityDropped: MCP="quantityDropped", obf="a" — signature (Random)->int
-                // damageDropped: MCP="damageDropped", obf="b" — signature (int)->int
-                for (Method m : block.getClass().getMethods()) {
-                    if (m.getReturnType() != int.class) continue;
-                    Class<?>[] p = m.getParameterTypes();
-                    if (p.length == 3 && p[0] == int.class && p[1] == java.util.Random.class && p[2] == int.class) {
-                        dropMethods[0] = m;
-                    } else if (p.length == 1 && p[0] == java.util.Random.class) {
-                        dropMethods[1] = m;
-                    } else if (p.length == 1 && p[0] == int.class
-                            && (m.getName().equals("damageDropped") || m.getName().equals("b"))) {
-                        dropMethods[2] = m;
-                    }
+    private static boolean invokeHarvestBlock(Object block, Object world, Object player, int x, int y, int z, int meta) {
+        String cls = block.getClass().getName();
+        Method m = harvestBlockMethodCache.get(cls);
+        if (m == null) {
+            for (Method mtd : block.getClass().getMethods()) {
+                Class<?>[] p = mtd.getParameterTypes();
+                if (p.length == 6 && !p[0].isPrimitive() && !p[1].isPrimitive()
+                        && p[2] == int.class && p[3] == int.class && p[4] == int.class && p[5] == int.class
+                        && mtd.getReturnType() == void.class
+                        && (mtd.getName().equals("harvestBlock") || mtd.getName().equals("b"))) {
+                    m = mtd;
+                    break;
                 }
-                blockDropMethodCache.put(blockClassName, dropMethods);
-                System.out.println("[OVM] resolved for " + blockClassName
-                    + " idDropped=" + (dropMethods[0] != null ? dropMethods[0].getName() : "null")
-                    + " qty=" + (dropMethods[1] != null ? dropMethods[1].getName() : "null")
-                    + " dmg=" + (dropMethods[2] != null ? dropMethods[2].getName() : "null"));
             }
-
-            int dropId =
-                dropMethods[0] != null
-                    ? (Integer) dropMethods[0].invoke(block, meta, RAND, 0)
-                    : 0;
-            System.out.println(
-                "[OVM] collectBlockDrops: dropId=" + dropId + " meta=" + meta
-            );
-            if (dropId == 0) return; // block drops nothing
-
-            int dropCount =
-                dropMethods[1] != null
-                    ? (Integer) dropMethods[1].invoke(block, RAND)
-                    : 1;
-            if (dropCount <= 0) return;
-
-            int dropDamage =
-                dropMethods[2] != null
-                    ? (Integer) dropMethods[2].invoke(block, meta)
-                    : 0;
-            System.out.println(
-                "[OVM] collectBlockDrops: dropCount=" +
-                    dropCount +
-                    " dropDamage=" +
-                    dropDamage
-            );
-
-            int key = dropId * 65536 + dropDamage;
-            int[] acc = merged.get(key);
-            if (acc == null) {
-                merged.put(key, new int[] { dropId, dropDamage, dropCount });
-            } else {
-                acc[2] += dropCount;
-            }
+            harvestBlockMethodCache.put(cls, m != null ? m : null);
+        }
+        if (m == null) return false;
+        try {
+            m.invoke(block, world, player, x, y, z, meta);
+            return true;
         } catch (Exception e) {
-            System.out.println("[OVM] collectBlockDrops error: " + e);
-            e.printStackTrace();
+            System.out.println("[OVM] invokeHarvestBlock error: " + e);
+            return false;
         }
     }
 
-    private static void deliverMergedDrops(
-        Object world,
-        Object player,
-        java.util.LinkedHashMap<Integer, int[]> merged
-    ) {
-        if (merged.isEmpty()) {
-            System.out.println("[OVM] deliverMergedDrops: no drops");
-            return;
+    // Per-class cache: [0]=idDropped(int,Random,int), [1]=quantityDropped(Random), [2]=damageDropped(int)
+    private static final HashMap<String, Method[]> blockDropMethodCache = new HashMap<String, Method[]>();
+
+    private static void collectBlockDrops(Object block, int meta, LinkedHashMap<Integer, int[]> merged) {
+        try {
+            String cls = block.getClass().getName();
+            Method[] m = blockDropMethodCache.get(cls);
+            if (m == null) {
+                m = new Method[3];
+                for (Method mtd : block.getClass().getMethods()) {
+                    if (mtd.getReturnType() != int.class) continue;
+                    Class<?>[] p = mtd.getParameterTypes();
+                    if (p.length == 3 && p[0] == int.class && p[1] == Random.class && p[2] == int.class)
+                        m[0] = mtd;
+                    else if (p.length == 1 && p[0] == Random.class)
+                        m[1] = mtd;
+                    else if (p.length == 1 && p[0] == int.class
+                            && (mtd.getName().equals("damageDropped") || mtd.getName().equals("b")))
+                        m[2] = mtd;
+                }
+                blockDropMethodCache.put(cls, m);
+            }
+
+            int dropId    = m[0] != null ? (Integer) m[0].invoke(block, meta, RAND, 0) : 0;
+            if (dropId == 0) return;
+            int dropCount = m[1] != null ? (Integer) m[1].invoke(block, RAND) : 1;
+            if (dropCount <= 0) return;
+            int dropDamage = m[2] != null ? (Integer) m[2].invoke(block, meta) : 0;
+
+            int key = dropId * 65536 + dropDamage;
+            int[] acc = merged.get(key);
+            if (acc == null) merged.put(key, new int[]{ dropId, dropDamage, dropCount });
+            else             acc[2] += dropCount;
+        } catch (Exception e) {
+            System.out.println("[OVM] collectBlockDrops error: " + e);
         }
+    }
 
-        double[] pos = getPlayerPos(player);
-        double px = pos[0],
-            py = pos[1],
-            pz = pos[2];
-        System.out.println(
-            "[OVM] deliverMergedDrops: " +
-                merged.size() +
-                " item types at (" +
-                px +
-                "," +
-                py +
-                "," +
-                pz +
-                ")"
-        );
+    // -----------------------------------------------------------------------
+    // Drop delivery
+    // -----------------------------------------------------------------------
 
-        int spawnCount = 0;
-        for (java.util.Map.Entry<Integer, int[]> entry : merged.entrySet()) {
+    private static void deliverDrops(Object world, Object player, LinkedHashMap<Integer, int[]> drops) {
+        if (drops.isEmpty()) return;
+        for (Map.Entry<Integer, int[]> entry : drops.entrySet()) {
             int[] acc = entry.getValue();
             int remaining = acc[2];
             while (remaining > 0) {
@@ -458,99 +255,58 @@ public class VeinMiner {
                 remaining -= batch;
                 Object stack = makeItemStack(acc[0], acc[1], batch);
                 if (stack == null) continue;
-                spawnItemReflect(world, px, py, pz, stack);
-                spawnCount++;
+                if (OvmConfig.dropsToInventory) {
+                    int leftover = addToInventory(player, stack);
+                    if (leftover > 0) {
+                        Object overflow = makeItemStack(acc[0], acc[1], leftover);
+                        if (overflow != null) spawnItemReflect(world, player, overflow);
+                    }
+                } else {
+                    spawnItemReflect(world, player, stack);
+                }
             }
         }
-        System.out.println(
-            "[OVM] deliverMergedDrops: spawned " + spawnCount + " stacks"
-        );
     }
 
-    // ItemStack field accessors — keyed per class name to handle yz (client) vs ur (server).
-    // yz(Class, itemId, count, damage): kv.a=itemId, yz.c=stackSize, yz.d=itemDamage
-    // ur(itemId, count, damage):        ur.c=itemId, ur.a=stackSize, ur.e=itemDamage
-    private static final java.util.Map<String, Field[]> stackFieldCache =
-        new java.util.HashMap<String, Field[]>(); // className -> [idField, sizeField, dmgField]
+    // -----------------------------------------------------------------------
+    // ItemStack field resolution
+    // -----------------------------------------------------------------------
 
-    /** Returns [idField, sizeField, dmgField] for this stack's class, or null entries on failure.
-     *  All returned fields are guaranteed to be int type. */
+    // Per-class cache: [itemId, stackSize, itemDamage]
+    // yz (client): kv.a=itemId, yz.c=stackSize, yz.d=itemDamage
+    // ur (server): ur.c=itemId, ur.a=stackSize, ur.e=itemDamage
+    private static final Map<String, Field[]> stackFieldCache = new HashMap<String, Field[]>();
+
     private static Field[] resolveStackFields(Object stack) {
         String cls = stack.getClass().getName();
         if (stackFieldCache.containsKey(cls)) return stackFieldCache.get(cls);
-        Field[] result = new Field[3]; // [itemId, stackSize, itemDamage]
-        // MCP names first
-        try { result[0] = findIntField(stack.getClass(), "itemID");    } catch (Exception ignored) {}
-        try { result[1] = findIntField(stack.getClass(), "stackSize"); } catch (Exception ignored) {}
-        try { result[2] = findIntField(stack.getClass(), "itemDamage");} catch (Exception ignored) {}
-        if (result[0] != null && result[1] != null && result[2] != null) {
-            System.out.println("[OVM] stackFields[" + cls + "]: MCP names");
-            stackFieldCache.put(cls, result);
-            return result;
-        }
-        // yz (client jar): kv.a=itemId, yz.c=stackSize, yz.d=itemDamage (all int)
-        try { result[0] = findIntField(stack.getClass(), "a"); } catch (Exception ignored) {}
-        try { result[1] = findIntField(stack.getClass(), "c"); } catch (Exception ignored) {}
-        try { result[2] = findIntField(stack.getClass(), "d"); } catch (Exception ignored) {}
-        if (result[0] != null && result[1] != null && result[2] != null) {
-            System.out.println("[OVM] stackFields[" + cls + "]: yz a/c/d");
-            stackFieldCache.put(cls, result);
-            return result;
-        }
-        // ur (server jar) from ctor bytecode: ur(itemId,count,damage) -> c=itemId, a=stackSize, e=itemDamage
-        result = new Field[3];
-        try { result[0] = findIntField(stack.getClass(), "c"); } catch (Exception ignored) {}
-        try { result[1] = findIntField(stack.getClass(), "a"); } catch (Exception ignored) {}
-        try { result[2] = findIntField(stack.getClass(), "e"); } catch (Exception ignored) {}
-        // Dump all int fields on this class to help verify the mapping
-        StringBuilder dump = new StringBuilder("[OVM] stackFields[" + cls + "] int fields: ");
-        Class<?> c = stack.getClass();
-        while (c != null && !c.getName().equals("java.lang.Object")) {
-            for (Field f : c.getDeclaredFields()) {
-                if (f.getType() == int.class) {
-                    f.setAccessible(true);
-                    try { dump.append(f.getName()).append("=").append(f.getInt(stack)).append(" "); }
-                    catch (Exception ignored) { dump.append(f.getName()).append("=? "); }
-                }
-            }
-            c = c.getSuperclass();
-        }
-        System.out.println(dump);
-        System.out.println("[OVM] stackFields[" + cls + "]: ur c/a/e => id=" +
-            (result[0] != null ? result[0].getName() : "null") + " size=" +
-            (result[1] != null ? result[1].getName() : "null") + " dmg=" +
-            (result[2] != null ? result[2].getName() : "null"));
+
+        Field[] result;
+
+        // MCP names
+        result = tryStackSchema(stack.getClass(), "itemID", "stackSize", "itemDamage");
+        if (result != null) { stackFieldCache.put(cls, result); return result; }
+
+        // yz (client): kv.a=itemId, yz.c=stackSize, yz.d=itemDamage
+        result = tryStackSchema(stack.getClass(), "a", "c", "d");
+        if (result != null) { stackFieldCache.put(cls, result); return result; }
+
+        // ur (server): ur.c=itemId, ur.a=stackSize, ur.e=itemDamage
+        result = tryStackSchema(stack.getClass(), "c", "a", "e");
+        if (result != null) { stackFieldCache.put(cls, result); return result; }
+
+        result = new Field[3]; // all null — will return 0 for everything
         stackFieldCache.put(cls, result);
         return result;
     }
 
-    private static Field findField(Class<?> cls, String name)
-        throws NoSuchFieldException {
-        while (cls != null && !cls.getName().equals("java.lang.Object")) {
-            try {
-                Field f = cls.getDeclaredField(name);
-                f.setAccessible(true);
-                return f;
-            } catch (NoSuchFieldException ignored) {}
-            cls = cls.getSuperclass();
-        }
-        throw new NoSuchFieldException(name);
-    }
-
-    /** Like findField but only matches fields of type int. */
-    private static Field findIntField(Class<?> cls, String name)
-        throws NoSuchFieldException {
-        while (cls != null && !cls.getName().equals("java.lang.Object")) {
-            try {
-                Field f = cls.getDeclaredField(name);
-                if (f.getType() == int.class) {
-                    f.setAccessible(true);
-                    return f;
-                }
-            } catch (NoSuchFieldException ignored) {}
-            cls = cls.getSuperclass();
-        }
-        throw new NoSuchFieldException(name + " (int)");
+    /** Returns [itemId, stackSize, itemDamage] fields if all three are int fields, else null. */
+    private static Field[] tryStackSchema(Class<?> cls, String idName, String sizeName, String damageName) {
+        Field[] result = new Field[3];
+        try { result[0] = findIntField(cls, idName);    } catch (Exception ignored) {}
+        try { result[1] = findIntField(cls, sizeName);  } catch (Exception ignored) {}
+        try { result[2] = findIntField(cls, damageName);} catch (Exception ignored) {}
+        return (result[0] != null && result[1] != null && result[2] != null) ? result : null;
     }
 
     private static int getStackSize(Object stack) {
@@ -568,383 +324,261 @@ public class VeinMiner {
         try { return f[2] != null ? f[2].getInt(stack) : 0; } catch (Exception e) { return 0; }
     }
 
-    // ItemStack.getMaxDamage(): MCP="getMaxDamage", obf="k" (ur.k()I per packaged.srg)
     private static int getStackMaxDamage(Object stack) {
-        for (String n : new String[] { "getMaxDamage", "k" }) {
-            try { return (Integer) stack.getClass().getMethod(n).invoke(stack); }
-            catch (Exception ignored) {}
-        }
-        return 0;
+        return invokeNoArg(stack, int.class, "getMaxDamage", "k");
     }
 
     // -----------------------------------------------------------------------
-    // Reflection helpers
+    // Reflection primitives
     // -----------------------------------------------------------------------
 
-    private static Object getFieldByNames(Object obj, String... names) {
+    /** Walk class hierarchy to find a declared field by name. */
+    private static Field findField(Class<?> cls, String name) throws NoSuchFieldException {
+        for (Class<?> c = cls; c != null && !c.getName().equals("java.lang.Object"); c = c.getSuperclass()) {
+            try { Field f = c.getDeclaredField(name); f.setAccessible(true); return f; }
+            catch (NoSuchFieldException ignored) {}
+        }
+        throw new NoSuchFieldException(name);
+    }
+
+    /** Walk class hierarchy to find a declared int field by name. */
+    private static Field findIntField(Class<?> cls, String name) throws NoSuchFieldException {
+        for (Class<?> c = cls; c != null && !c.getName().equals("java.lang.Object"); c = c.getSuperclass()) {
+            try {
+                Field f = c.getDeclaredField(name);
+                if (f.getType() == int.class) { f.setAccessible(true); return f; }
+            } catch (NoSuchFieldException ignored) {}
+        }
+        throw new NoSuchFieldException(name + " (int)");
+    }
+
+    /**
+     * Get a typed field value from obj, trying each name in order.
+     * Uses public getField first, then hierarchy walk via findField.
+     * Returns type default (null/false/0) if not found.
+     */
+    @SuppressWarnings("unchecked")
+    private static <T> T getField(Object obj, Class<T> type, String... names) {
         for (String name : names) {
+            // Try public field first
             try {
                 Field f = obj.getClass().getField(name);
-                return f.get(obj);
+                return (T) fieldGet(f, obj, type);
+            } catch (Exception ignored) {}
+            // Then hierarchy
+            try {
+                Field f = findField(obj.getClass(), name);
+                return (T) fieldGet(f, obj, type);
             } catch (Exception ignored) {}
         }
+        return defaultValue(type);
+    }
+
+    private static Object fieldGet(Field f, Object obj, Class<?> type) throws Exception {
+        if (type == boolean.class) return f.getBoolean(obj);
+        if (type == int.class)     return f.getInt(obj);
+        if (type == double.class)  return f.getDouble(obj);
+        return f.get(obj);
+    }
+
+    @SuppressWarnings("unchecked")
+    private static <T> T defaultValue(Class<T> type) {
+        if (type == boolean.class) return (T) Boolean.FALSE;
+        if (type == int.class)     return (T) Integer.valueOf(0);
+        if (type == double.class)  return (T) Double.valueOf(0.0);
         return null;
     }
 
-    private static boolean getBooleanByNames(Object obj, String... names) {
+    /**
+     * Invoke a no-arg method by name, returning typed result.
+     * Returns type default if not found or on error.
+     */
+    @SuppressWarnings("unchecked")
+    private static <T> T invokeNoArg(Object obj, Class<T> type, String... names) {
         for (String name : names) {
             try {
-                return obj.getClass().getField(name).getBoolean(obj);
+                Method m = obj.getClass().getMethod(name);
+                Object result = m.invoke(obj);
+                return result != null ? (T) result : defaultValue(type);
             } catch (Exception ignored) {}
         }
-        return false;
+        return defaultValue(type);
     }
 
-    private static Object invokeByNames(Object obj, String... names) {
-        for (String name : names) {
-            try {
-                return obj.getClass().getMethod(name).invoke(obj);
-            } catch (Exception ignored) {}
-        }
-        return null;
+    private static void invokeWithStringArg(Object obj, String method, String arg) {
+        try { obj.getClass().getMethod(method, String.class).invoke(obj, arg); }
+        catch (Exception ignored) {}
     }
 
-    private static int invokeIntByNames(Object obj, String... names) {
-        for (String name : names) {
-            try {
-                return (Integer) obj.getClass().getMethod(name).invoke(obj);
-            } catch (Exception ignored) {}
-        }
-        return 0;
+    private static void invokeWithFloatArg(Object obj, String... names) {
+        // names: mcpName, obfName — last element is the float value encoded as a string? No —
+        // caller passes (obj, mcpName, obfName, floatVal). Handle via varargs workaround below.
+        // This overload is not used; see the 4-arg version.
     }
 
-    private static void invokeFloatByNames(
-        Object obj,
-        String mcpName,
-        String obfName,
-        float arg
-    ) {
-        for (String name : new String[] { mcpName, obfName }) {
-            try {
-                obj.getClass().getMethod(name, float.class).invoke(obj, arg);
-                return;
-            } catch (Exception ignored) {}
+    private static void invokeWithFloatArg(Object obj, String mcpName, String obfName, float arg) {
+        for (String name : new String[]{ mcpName, obfName }) {
+            try { obj.getClass().getMethod(name, float.class).invoke(obj, arg); return; }
+            catch (Exception ignored) {}
         }
     }
 
-    private static void invokeWithStringArg(
-        Object obj,
-        String method,
-        String arg
-    ) {
-        try {
-            obj.getClass().getMethod(method, String.class).invoke(obj, arg);
-        } catch (Exception ignored) {}
-    }
+    // -----------------------------------------------------------------------
+    // World accessors (cached method lookup)
+    // -----------------------------------------------------------------------
 
-    // World.getBlockId(III): MCP="getBlockId", obf="a"
-    private static Method getBlockIdMethod = null;
-
+    // World.getBlockId(III)
+    private static Method getBlockIdMethod;
     private static int invokeGetBlockId(Object world, int x, int y, int z) {
         try {
             if (getBlockIdMethod == null) {
-                for (String n : new String[] { "getBlockId", "a" }) {
-                    try {
-                        getBlockIdMethod = world
-                            .getClass()
-                            .getMethod(n, int.class, int.class, int.class);
-                        break;
-                    } catch (Exception ignored) {}
+                for (String n : new String[]{ "getBlockId", "a" }) {
+                    try { getBlockIdMethod = world.getClass().getMethod(n, int.class, int.class, int.class); break; }
+                    catch (Exception ignored) {}
                 }
             }
-            if (getBlockIdMethod == null) return 0;
-            return (Integer) getBlockIdMethod.invoke(world, x, y, z);
-        } catch (Exception e) {
-            return 0;
-        }
+            return getBlockIdMethod != null ? (Integer) getBlockIdMethod.invoke(world, x, y, z) : 0;
+        } catch (Exception e) { return 0; }
     }
 
-    // World.getBlockMetadata(III): MCP="getBlockMetadata", obf="h"
-    private static Method getBlockMetaMethod = null;
-
+    // World.getBlockMetadata(III)
+    private static Method getBlockMetaMethod;
     private static int invokeGetBlockMeta(Object world, int x, int y, int z) {
         try {
             if (getBlockMetaMethod == null) {
-                for (String n : new String[] { "getBlockMetadata", "h" }) {
-                    try {
-                        getBlockMetaMethod = world
-                            .getClass()
-                            .getMethod(n, int.class, int.class, int.class);
-                        break;
-                    } catch (Exception ignored) {}
+                for (String n : new String[]{ "getBlockMetadata", "h" }) {
+                    try { getBlockMetaMethod = world.getClass().getMethod(n, int.class, int.class, int.class); break; }
+                    catch (Exception ignored) {}
                 }
             }
-            if (getBlockMetaMethod == null) return 0;
-            return (Integer) getBlockMetaMethod.invoke(world, x, y, z);
-        } catch (Exception e) {
-            return 0;
-        }
+            return getBlockMetaMethod != null ? (Integer) getBlockMetaMethod.invoke(world, x, y, z) : 0;
+        } catch (Exception e) { return 0; }
     }
 
-    // setBlock(IIII)Z — direct chunk write, MCP="setBlock", obf="b"
-    private static Method setBlockDirectMethod = null;
-    // markBlockForUpdate(III)V — sends visual update to client, MCP="markBlockForUpdate"
-    private static Method markBlockForUpdateMethod = null;
-    // notifyBlockChange(IIII)V — triggers neighbor updates (torches pop, etc), MCP="notifyBlockChange"
-    private static Method notifyBlockChangeMethod = null;
+    // World.setBlock(IIII)Z + markBlockForUpdate(III)V + notifyBlockChange(IIII)V
+    private static Method setBlockMethod;
+    private static Method markBlockForUpdateMethod;
+    private static Method notifyBlockChangeMethod;
 
-    private static void invokeSetBlock(
-        Object world,
-        int x,
-        int y,
-        int z,
-        int id
-    ) {
+    private static void invokeSetBlock(Object world, int x, int y, int z, int id) {
         try {
-            if (setBlockDirectMethod == null) {
-                for (String n : new String[] { "setBlock", "b" }) {
+            if (setBlockMethod == null) {
+                // setBlock(IIII)Z — direct write
+                for (String n : new String[]{ "setBlock", "b" }) {
                     try {
-                        Method m = world
-                            .getClass()
-                            .getMethod(
-                                n,
-                                int.class,
-                                int.class,
-                                int.class,
-                                int.class
-                            );
-                        if (
-                            m.getReturnType() == boolean.class ||
-                            m.getReturnType() == Boolean.class
-                        ) {
-                            setBlockDirectMethod = m;
-                            System.out.println(
-                                "[OVM] invokeSetBlock: setBlock='" + n + "'"
-                            );
-                            break;
-                        }
+                        Method m = world.getClass().getMethod(n, int.class, int.class, int.class, int.class);
+                        if (m.getReturnType() == boolean.class) { setBlockMethod = m; break; }
                     } catch (Exception ignored) {}
+                }
+                // fallback: setBlockWithNotify does setBlock+notify in one call
+                if (setBlockMethod == null) {
+                    for (String n : new String[]{ "setBlockWithNotify", "c" }) {
+                        try { setBlockMethod = world.getClass().getMethod(n, int.class, int.class, int.class, int.class); break; }
+                        catch (Exception ignored) {}
+                    }
                 }
             }
             if (markBlockForUpdateMethod == null) {
-                for (String n : new String[] { "markBlockForUpdate", "h" }) {
+                for (String n : new String[]{ "markBlockForUpdate", "h" }) {
                     try {
-                        Method m = world
-                            .getClass()
-                            .getMethod(n, int.class, int.class, int.class);
-                        if (m.getReturnType() == void.class) {
-                            markBlockForUpdateMethod = m;
-                            System.out.println(
-                                "[OVM] invokeSetBlock: markBlockForUpdate='" +
-                                    n +
-                                    "'"
-                            );
-                            break;
-                        }
+                        Method m = world.getClass().getMethod(n, int.class, int.class, int.class);
+                        if (m.getReturnType() == void.class) { markBlockForUpdateMethod = m; break; }
                     } catch (Exception ignored) {}
                 }
             }
             if (notifyBlockChangeMethod == null) {
-                for (String n : new String[] { "notifyBlockChange", "f" }) {
+                for (String n : new String[]{ "notifyBlockChange", "f" }) {
                     try {
-                        Method m = world
-                            .getClass()
-                            .getMethod(
-                                n,
-                                int.class,
-                                int.class,
-                                int.class,
-                                int.class
-                            );
-                        if (m.getReturnType() == void.class) {
-                            notifyBlockChangeMethod = m;
-                            System.out.println(
-                                "[OVM] invokeSetBlock: notifyBlockChange='" +
-                                    n +
-                                    "'"
-                            );
-                            break;
-                        }
+                        Method m = world.getClass().getMethod(n, int.class, int.class, int.class, int.class);
+                        if (m.getReturnType() == void.class) { notifyBlockChangeMethod = m; break; }
                     } catch (Exception ignored) {}
                 }
             }
-            if (setBlockDirectMethod == null) {
-                // Last resort: setBlockWithNotify does setBlock+notifyBlockChange in one call
-                for (String n : new String[] { "setBlockWithNotify", "c" }) {
-                    try {
-                        setBlockDirectMethod = world
-                            .getClass()
-                            .getMethod(
-                                n,
-                                int.class,
-                                int.class,
-                                int.class,
-                                int.class
-                            );
-                        System.out.println(
-                            "[OVM] invokeSetBlock: fallback setBlockWithNotify='" +
-                                n +
-                                "'"
-                        );
-                        break;
-                    } catch (Exception ignored) {}
-                }
-            }
-            if (setBlockDirectMethod == null) {
-                System.out.println("[OVM] invokeSetBlock: NO METHOD FOUND");
-                return;
-            }
-            Object result = setBlockDirectMethod.invoke(world, x, y, z, id);
+
+            if (setBlockMethod == null) return;
+            setBlockMethod.invoke(world, x, y, z, id);
             if (markBlockForUpdateMethod != null) {
-                markBlockForUpdateMethod.invoke(world, x, y, z);
-                // Also mark face-neighbors so attached blocks (torches, etc) update visually
-                markBlockForUpdateMethod.invoke(world, x + 1, y, z);
-                markBlockForUpdateMethod.invoke(world, x - 1, y, z);
-                markBlockForUpdateMethod.invoke(world, x, y + 1, z);
-                markBlockForUpdateMethod.invoke(world, x, y - 1, z);
-                markBlockForUpdateMethod.invoke(world, x, y, z + 1);
-                markBlockForUpdateMethod.invoke(world, x, y, z - 1);
+                markBlockForUpdateMethod.invoke(world, x,     y,     z);
+                markBlockForUpdateMethod.invoke(world, x + 1, y,     z);
+                markBlockForUpdateMethod.invoke(world, x - 1, y,     z);
+                markBlockForUpdateMethod.invoke(world, x,     y + 1, z);
+                markBlockForUpdateMethod.invoke(world, x,     y - 1, z);
+                markBlockForUpdateMethod.invoke(world, x,     y,     z + 1);
+                markBlockForUpdateMethod.invoke(world, x,     y,     z - 1);
             }
-            if (notifyBlockChangeMethod != null) notifyBlockChangeMethod.invoke(
-                world,
-                x,
-                y,
-                z,
-                id
-            );
-            System.out.println(
-                "[OVM] invokeSetBlock (" +
-                    x +
-                    "," +
-                    y +
-                    "," +
-                    z +
-                    ") id=" +
-                    id +
-                    " result=" +
-                    result
-            );
+            if (notifyBlockChangeMethod != null) notifyBlockChangeMethod.invoke(world, x, y, z, id);
         } catch (Exception e) {
             System.out.println("[OVM] invokeSetBlock error: " + e);
-            e.printStackTrace();
         }
     }
 
-    private static Object[] blocksListCache = null;
+    // -----------------------------------------------------------------------
+    // Block and player helpers
+    // -----------------------------------------------------------------------
 
+    private static Object[] blocksListCache;
     private static Object getBlockFromArray(int id) {
         try {
             if (blocksListCache == null) {
-                for (String cname : new String[] {
-                    "net.minecraft.block.Block",
-                    "amq",
-                }) {
+                for (String cname : new String[]{ "net.minecraft.block.Block", "amq" }) {
                     try {
-                        Class<?> blockClass = Class.forName(cname);
-                        for (String fname : new String[] {
-                            "blocksList",
-                            "p",
-                        }) {
+                        Class<?> cls = Class.forName(cname);
+                        for (String fname : new String[]{ "blocksList", "p" }) {
                             try {
-                                Field f = blockClass.getDeclaredField(fname);
+                                Field f = cls.getDeclaredField(fname);
                                 f.setAccessible(true);
                                 Object[] arr = (Object[]) f.get(null);
-                                if (arr != null) {
-                                    blocksListCache = arr;
-                                    break;
-                                }
+                                if (arr != null) { blocksListCache = arr; break; }
                             } catch (Exception ignored) {}
                         }
                         if (blocksListCache != null) break;
                     } catch (Exception ignored) {}
                 }
             }
-            if (blocksListCache == null) {
-                System.out.println(
-                    "[OVM] getBlockFromArray: blocksList not found"
-                );
-                return null;
-            }
-            return (id >= 0 && id < blocksListCache.length)
-                ? blocksListCache[id]
-                : null;
-        } catch (Exception e) {
-            System.out.println("[OVM] getBlockFromArray error: " + e);
-            return null;
-        }
+            return (blocksListCache != null && id >= 0 && id < blocksListCache.length)
+                ? blocksListCache[id] : null;
+        } catch (Exception e) { return null; }
     }
 
-    // EntityPlayer.canHarvestBlock(Block)
-    private static Method canHarvestMethod = null;
-
+    private static Method canHarvestMethod;
     private static boolean invokeCanHarvest(Object player, Object block) {
         try {
             if (canHarvestMethod == null) {
                 for (Method m : player.getClass().getMethods()) {
-                    if (
-                        m.getParameterTypes().length == 1 &&
-                        (m.getName().equals("canHarvestBlock") ||
-                            m.getName().length() == 1) &&
-                        (m.getReturnType() == boolean.class ||
-                            m.getReturnType() == Boolean.class)
-                    ) {
-                        try {
-                            m.invoke(player, block);
-                            canHarvestMethod = m;
-                            break;
-                        } catch (Exception ignored) {}
+                    if (m.getParameterTypes().length == 1
+                            && (m.getName().equals("canHarvestBlock") || m.getName().length() == 1)
+                            && m.getReturnType() == boolean.class) {
+                        try { m.invoke(player, block); canHarvestMethod = m; break; }
+                        catch (Exception ignored) {}
                     }
                 }
             }
-            if (
-                canHarvestMethod != null
-            ) return (Boolean) canHarvestMethod.invoke(player, block);
-        } catch (Exception ignored) {}
-        return true;
+            return canHarvestMethod != null ? (Boolean) canHarvestMethod.invoke(player, block) : true;
+        } catch (Exception ignored) { return true; }
     }
 
-    // ItemStack.damageItem(int, EntityLiving): 2 params, first is int
-    private static Method damageItemMethod = null;
-
-    private static void damageItemReflect(
-        Object stack,
-        int amount,
-        Object player
-    ) {
+    private static Method damageItemMethod;
+    private static void damageItemReflect(Object stack, int amount, Object player) {
         try {
             if (damageItemMethod == null) {
+                // Prefer exact match: damageItem(int, EntityLiving) void
                 for (Method m : stack.getClass().getMethods()) {
                     Class<?>[] p = m.getParameterTypes();
-                    if (
-                        p.length == 2 &&
-                        p[0] == int.class &&
-                        !p[1].isPrimitive() &&
-                        (m.getName().equals("damageItem") ||
-                            m.getName().equals("a")) &&
-                        (m.getReturnType() == void.class) &&
-                        p[1].isAssignableFrom(player.getClass())
-                    ) {
-                        damageItemMethod = m;
-                        System.out.println("[OVM] damageItem: resolved via strict match '" + m.getName() + "'");
-                        break;
+                    if (p.length == 2 && p[0] == int.class && !p[1].isPrimitive()
+                            && (m.getName().equals("damageItem") || m.getName().equals("a"))
+                            && m.getReturnType() == void.class
+                            && p[1].isAssignableFrom(player.getClass())) {
+                        damageItemMethod = m; break;
                     }
                 }
+                // Loose fallback
                 if (damageItemMethod == null) {
                     for (Method m : stack.getClass().getMethods()) {
                         Class<?>[] p = m.getParameterTypes();
-                        if (
-                            p.length == 2 &&
-                            p[0] == int.class &&
-                            !p[1].isPrimitive()
-                        ) {
-                            damageItemMethod = m;
-                            System.out.println("[OVM] damageItem: resolved via loose match '" + m.getName() + "' params=(" + p[0].getSimpleName() + "," + p[1].getName() + ")");
-                            break;
+                        if (p.length == 2 && p[0] == int.class && !p[1].isPrimitive()) {
+                            damageItemMethod = m; break;
                         }
                     }
-                }
-                if (damageItemMethod == null) {
-                    System.out.println("[OVM] damageItem: NO METHOD FOUND on " + stack.getClass().getName());
                 }
             }
             if (damageItemMethod != null) damageItemMethod.invoke(stack, amount, player);
@@ -954,32 +588,20 @@ public class VeinMiner {
     }
 
     private static boolean isItemStackDamageable(Object stack) {
-        // yz (client): q()  — ur (server): f()   [SRG: func_77984_f]
-        for (String n : new String[] { "isItemStackDamageable", "f", "q" }) {
-            try {
-                return (Boolean) stack.getClass().getMethod(n).invoke(stack);
-            } catch (Exception ignored) {}
-        }
-        return false;
+        return invokeNoArg(stack, boolean.class, "isItemStackDamageable", "f", "q");
     }
 
-    // EntityPlayer.getHeldItem():
-    //   Server path: player.bJ (InventoryPlayer qw), then qw.g() = getCurrentItem() -> ur (ItemStack)
-    //   Client path: try MCP getHeldItem() / bD() on player directly
-    private static Method getHeldItemMethod = null;   // on player directly (client fallback)
-    private static Field  inventoryField    = null;   // player.bJ / player.inventory -> qw
-    private static Method inventoryGetCurrent = null; // qw.g() / qw.getCurrentItem() -> ur
+    // EntityPlayer inventory path: player.inventory (bJ) -> getCurrentItem() (g)
+    private static Field  inventoryField;
+    private static Method inventoryGetCurrent;
+    // Fallback: player.getHeldItem() / bD()
+    private static Method getHeldItemMethod;
 
     private static Object getHeldItem(Object player) {
-        // Server path: player.bJ.g()
         if (inventoryField == null) {
-            for (String n : new String[] { "inventory", "bJ" }) {
-                try {
-                    Field f = findField(player.getClass(), n);
-                    inventoryField = f;
-                    System.out.println("[OVM] getHeldItem: inventory field='" + n + "' type=" + f.getType().getName());
-                    break;
-                } catch (Exception ignored) {}
+            for (String n : new String[]{ "inventory", "bJ" }) {
+                try { inventoryField = findField(player.getClass(), n); break; }
+                catch (Exception ignored) {}
             }
         }
         if (inventoryField != null) {
@@ -987,310 +609,149 @@ public class VeinMiner {
                 Object inv = inventoryField.get(player);
                 if (inv != null) {
                     if (inventoryGetCurrent == null) {
-                        for (String n : new String[] { "getCurrentItem", "g" }) {
+                        for (String n : new String[]{ "getCurrentItem", "g" }) {
                             try {
                                 Method m = inv.getClass().getMethod(n);
-                                Class<?> r = m.getReturnType();
-                                if (r == void.class || r.isPrimitive()) continue;
-                                inventoryGetCurrent = m;
-                                System.out.println("[OVM] getHeldItem: inventory.getCurrentItem='" + n + "' returns=" + r.getName());
-                                break;
+                                if (m.getReturnType() != void.class && !m.getReturnType().isPrimitive()) {
+                                    inventoryGetCurrent = m; break;
+                                }
                             } catch (Exception ignored) {}
                         }
                     }
-                    if (inventoryGetCurrent != null) {
-                        Object held = inventoryGetCurrent.invoke(inv);
-                        return held;
-                    }
+                    if (inventoryGetCurrent != null) return inventoryGetCurrent.invoke(inv);
                 }
-            } catch (Exception e) {
-                System.out.println("[OVM] getHeldItem inventory path error: " + e);
-            }
+            } catch (Exception ignored) {}
         }
-        // Client fallback: player.getHeldItem() / bD()
         if (getHeldItemMethod == null) {
-            for (String n : new String[] { "getHeldItem", "bD", "bE", "bF", "bC" }) {
+            for (String n : new String[]{ "getHeldItem", "bD", "bE", "bF", "bC" }) {
                 try {
                     Method m = player.getClass().getMethod(n);
-                    Class<?> r = m.getReturnType();
-                    if (r == void.class || r.isPrimitive()) continue;
-                    getHeldItemMethod = m;
-                    System.out.println("[OVM] getHeldItem: fallback method='" + n + "' returns=" + r.getName());
-                    break;
-                } catch (Exception ignored) {}
-            }
-            if (getHeldItemMethod == null) {
-                System.out.println("[OVM] getHeldItem: NO METHOD FOUND on " + player.getClass().getName());
-            }
-        }
-        try {
-            return getHeldItemMethod != null ? getHeldItemMethod.invoke(player) : null;
-        } catch (Exception e) {
-            System.out.println("[OVM] getHeldItem invoke error: " + e);
-            return null;
-        }
-    }
-
-    // EntityPlayer.destroyCurrentEquippedItem() — destroys held item when durability hits 0
-    private static Method destroyEquippedMethod = null;
-
-    private static void destroyHeldItem(Object player) {
-        if (destroyEquippedMethod == null) {
-            for (String n : new String[] {
-                "destroyCurrentEquippedItem",
-                "bT",
-                "bU",
-                "bS",
-            }) {
-                try {
-                    destroyEquippedMethod = player.getClass().getMethod(n);
-                    System.out.println(
-                        "[OVM] destroyHeldItem: method='" + n + "'"
-                    );
-                    break;
+                    if (m.getReturnType() != void.class && !m.getReturnType().isPrimitive()) {
+                        getHeldItemMethod = m; break;
+                    }
                 } catch (Exception ignored) {}
             }
         }
-        try {
-            if (destroyEquippedMethod != null) destroyEquippedMethod.invoke(
-                player
-            );
-        } catch (Exception ignored) {}
+        try { return getHeldItemMethod != null ? getHeldItemMethod.invoke(player) : null; }
+        catch (Exception e) { return null; }
     }
 
-    // Construct a new ItemStack(int itemId, int count, int damage)
-    // Runtime yz(Class, int, int, int) — first Class arg is Forge coremods token, pass null
-    private static Constructor<?> itemStackCtor = null;
-    private static boolean itemStackCtorHasClass = false;
+    // -----------------------------------------------------------------------
+    // Item stack construction and delivery
+    // -----------------------------------------------------------------------
+
+    private static Constructor<?> itemStackCtor;
+    private static boolean itemStackCtorHasClass;
 
     private static Object makeItemStack(int itemId, int damage, int count) {
         try {
             if (itemStackCtor == null) {
-                for (String cname : new String[] {
-                    "net.minecraft.item.ItemStack",
-                    "ur",   // server jar obf (try first — we run server-side)
-                    "yz",   // client jar obf
-                }) {
+                for (String cname : new String[]{ "net.minecraft.item.ItemStack", "ur", "yz" }) {
                     try {
                         Class<?> cls = Class.forName(cname);
-                        // Try (int,int,int) first, then (Class,int,int,int)
                         try {
-                            itemStackCtor = cls.getConstructor(
-                                int.class,
-                                int.class,
-                                int.class
-                            );
+                            itemStackCtor = cls.getConstructor(int.class, int.class, int.class);
                             itemStackCtorHasClass = false;
-                            System.out.println(
-                                "[OVM] makeItemStack: class='" +
-                                    cname +
-                                    "' ctor=(int,int,int)"
-                            );
                         } catch (Exception ignored) {
-                            itemStackCtor = cls.getConstructor(
-                                Class.class,
-                                int.class,
-                                int.class,
-                                int.class
-                            );
+                            itemStackCtor = cls.getConstructor(Class.class, int.class, int.class, int.class);
                             itemStackCtorHasClass = true;
-                            System.out.println(
-                                "[OVM] makeItemStack: class='" +
-                                    cname +
-                                    "' ctor=(Class,int,int,int)"
-                            );
                         }
                         break;
                     } catch (Exception ignored) {}
                 }
             }
-            if (itemStackCtor == null) {
-                System.out.println("[OVM] makeItemStack: no ctor found");
-                return null;
-            }
-            Object stack;
-            if (itemStackCtorHasClass) {
-                // (Class, itemId, count, damage) — note arg order: id, count, damage
-                stack = itemStackCtor.newInstance((Object) null, itemId, count, damage);
-            } else {
-                // (itemId, count, damage)
-                stack = itemStackCtor.newInstance(itemId, count, damage);
-            }
-            // Verify the stack has the right values — this catches arg-order bugs
-            resolveStackFields(stack);
-            int gotId    = getStackItemId(stack);
-            int gotSize  = getStackSize(stack);
-            int gotDmg   = getStackDamage(stack);
-            System.out.println("[OVM] makeItemStack: want id=" + itemId + " count=" + count + " dmg=" + damage
-                + " => got id=" + gotId + " count=" + gotSize + " dmg=" + gotDmg);
-            return stack;
+            if (itemStackCtor == null) return null;
+            return itemStackCtorHasClass
+                ? itemStackCtor.newInstance((Object) null, itemId, count, damage)
+                : itemStackCtor.newInstance(itemId, count, damage);
         } catch (Exception e) {
             System.out.println("[OVM] makeItemStack error: " + e);
             return null;
         }
     }
 
-    // EntityItem.getEntityItem(): no-arg, returns ItemStack
-    private static Method getEntityItemMethod = null;
+    // InventoryPlayer.addItemStackToInventory(ItemStack)Z — MCP name, obf "c" (or "b")
+    private static Method addToInventoryMethod;
 
-    private static Object getEntityItemStack(Object entityItem) {
+    /** Add stack to player inventory. Returns leftover count (0 if fully added). */
+    private static int addToInventory(Object player, Object stack) {
         try {
-            if (getEntityItemMethod == null) {
-                for (Method m : entityItem.getClass().getMethods()) {
-                    if (
-                        m.getParameterTypes().length == 0 &&
-                        (m.getName().equals("getEntityItem") ||
-                            m.getName().equals("c"))
-                    ) {
-                        getEntityItemMethod = m;
-                        break;
+            Object inv = inventoryField != null ? inventoryField.get(player) : null;
+            if (inv == null) return getStackSize(stack);
+            if (addToInventoryMethod == null) {
+                for (String n : new String[]{ "addItemStackToInventory", "c", "b" }) {
+                    try {
+                        Method m = inv.getClass().getMethod(n, stack.getClass());
+                        if (m.getReturnType() == boolean.class) { addToInventoryMethod = m; break; }
+                    } catch (Exception ignored) {}
+                }
+                if (addToInventoryMethod == null) {
+                    for (Method m : inv.getClass().getMethods()) {
+                        Class<?>[] p = m.getParameterTypes();
+                        if (p.length == 1 && !p[0].isPrimitive()
+                                && p[0].isAssignableFrom(stack.getClass())
+                                && m.getReturnType() == boolean.class
+                                && (m.getName().equals("addItemStackToInventory")
+                                    || m.getName().equals("c") || m.getName().equals("b"))) {
+                            addToInventoryMethod = m; break;
+                        }
                     }
                 }
             }
-            return getEntityItemMethod != null
-                ? getEntityItemMethod.invoke(entityItem)
-                : null;
+            if (addToInventoryMethod == null) return getStackSize(stack);
+            boolean added = (Boolean) addToInventoryMethod.invoke(inv, stack);
+            int remaining = getStackSize(stack);
+            return (added && remaining <= 0) ? 0 : remaining;
         } catch (Exception e) {
-            return null;
+            System.out.println("[OVM] addToInventory error: " + e);
+            return getStackSize(stack);
         }
     }
 
-    // World.spawnEntityInWorld(Entity)
-    private static Constructor<?> entityItemCtor = null;
-    private static Method spawnEntityMethod = null;
+    private static Constructor<?> entityItemCtor;
+    private static Method spawnEntityMethod;
 
-    private static void spawnItemReflect(
-        Object world,
-        double x,
-        double y,
-        double z,
-        Object stack
-    ) {
+    private static void spawnItemReflect(Object world, Object player, Object stack) {
         try {
+            double px = getField(player, double.class, "posX", "bT");
+            double py = getField(player, double.class, "posY", "bU");
+            double pz = getField(player, double.class, "posZ", "bV");
+
             if (entityItemCtor == null) {
                 Class<?> eiClass = null;
-                for (String cname : new String[] {
-                    "net.minecraft.entity.item.EntityItem",
-                    "px",
-                }) {
-                    try {
-                        eiClass = Class.forName(cname);
-                        break;
-                    } catch (Exception ignored) {}
+                for (String cname : new String[]{ "net.minecraft.entity.item.EntityItem", "px" }) {
+                    try { eiClass = Class.forName(cname); break; }
+                    catch (Exception ignored) {}
                 }
-                if (eiClass == null) { System.out.println("[OVM] spawnItem: EntityItem class not found"); return; }
+                if (eiClass == null) return;
                 Class<?> worldClass = world.getClass();
                 while (worldClass != null) {
                     try {
-                        entityItemCtor = eiClass.getConstructor(
-                            worldClass,
-                            double.class,
-                            double.class,
-                            double.class,
-                            stack.getClass()
-                        );
-                        System.out.println("[OVM] spawnItem: ctor found worldClass=" + worldClass.getName() + " stackClass=" + stack.getClass().getName());
+                        entityItemCtor = eiClass.getConstructor(worldClass, double.class, double.class, double.class, stack.getClass());
                         break;
-                    } catch (Exception ignored) {
-                        worldClass = worldClass.getSuperclass();
-                    }
+                    } catch (Exception ignored) { worldClass = worldClass.getSuperclass(); }
                 }
-                if (entityItemCtor == null) System.out.println("[OVM] spawnItem: ctor NOT FOUND for stackClass=" + stack.getClass().getName());
             }
             if (entityItemCtor == null) return;
-            Object ei = entityItemCtor.newInstance(world, x, y, z, stack);
+            Object ei = entityItemCtor.newInstance(world, px, py, pz, stack);
             if (spawnEntityMethod == null) {
-                // MCP: spawnEntityInWorld, obf: d (yc.d(lq)Z per packaged.srg func_72838_d)
-                // Must accept ei (EntityItem/px which extends Entity/lq)
-                for (String n : new String[] { "spawnEntityInWorld", "d" }) {
+                for (String n : new String[]{ "spawnEntityInWorld", "d" }) {
                     for (Method m : world.getClass().getMethods()) {
                         if (m.getName().equals(n) && m.getParameterTypes().length == 1
                                 && m.getParameterTypes()[0].isAssignableFrom(ei.getClass())) {
-                            spawnEntityMethod = m;
-                            System.out.println("[OVM] spawnItem: spawnEntity='" + n + "' param=" + m.getParameterTypes()[0].getName());
-                            break;
+                            spawnEntityMethod = m; break;
                         }
                     }
                     if (spawnEntityMethod != null) break;
                 }
             }
-            if (spawnEntityMethod == null) { System.out.println("[OVM] spawnItem: no spawn method found"); return; }
-            spawnEntityMethod.invoke(world, ei);
+            if (spawnEntityMethod != null) spawnEntityMethod.invoke(world, ei);
         } catch (Exception e) {
             System.out.println("[OVM] spawnItemReflect error: " + e);
-            e.printStackTrace();
         }
-    }
-
-    private static int getIntField(Object obj, String name) {
-        // Try public field first, then declared (obf) up the hierarchy
-        try {
-            return obj.getClass().getField(name).getInt(obj);
-        } catch (Exception ignored) {}
-        Class<?> c = obj.getClass();
-        while (c != null) {
-            try {
-                Field f = c.getDeclaredField(name);
-                f.setAccessible(true);
-                return f.getInt(obj);
-            } catch (Exception ignored) {}
-            c = c.getSuperclass();
-        }
-        return 0;
-    }
-
-    private static double getDoubleField(Object obj, String name) {
-        // Try public field first, then declared (obf) up the hierarchy
-        try {
-            return obj.getClass().getField(name).getDouble(obj);
-        } catch (Exception ignored) {}
-        Class<?> c = obj.getClass();
-        while (c != null) {
-            try {
-                Field f = c.getDeclaredField(name);
-                f.setAccessible(true);
-                return f.getDouble(obj);
-            } catch (Exception ignored) {}
-            c = c.getSuperclass();
-        }
-        return 0.0;
-    }
-
-    /** Get player position. posX/Y/Z are on EntityPlayer (qx): obf bT, bU, bV. */
-    private static double[] getPlayerPos(Object player) {
-        // Try MCP names first (work in dev), then known obf names for 1.4.7
-        for (String[] names : new String[][] {
-            { "posX", "posY", "posZ" },
-            { "bT", "bU", "bV" },
-        }) {
-            try {
-                double x = getDoubleField(player, names[0]);
-                double y = getDoubleField(player, names[1]);
-                double z = getDoubleField(player, names[2]);
-                if (x != 0.0 || y != 0.0 || z != 0.0) {
-                    System.out.println(
-                        "[OVM] getPlayerPos: (" +
-                            x +
-                            "," +
-                            y +
-                            "," +
-                            z +
-                            ") via " +
-                            names[0]
-                    );
-                    return new double[] { x, y, z };
-                }
-            } catch (Exception ignored) {}
-        }
-        System.out.println("[OVM] getPlayerPos: failed, defaulting");
-        return new double[] { 0, 64, 0 };
     }
 
     private static long coordKey(int x, int y, int z) {
-        return (
-            ((long) (x + 30000)) * 60001L * 512L +
-            ((long) (y + 256)) * 60001L +
-            (z + 30000)
-        );
+        return ((long)(x + 30000)) * 60001L * 512L + ((long)(y + 256)) * 60001L + (z + 30000);
     }
 }
