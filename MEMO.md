@@ -89,6 +89,24 @@ jar -xf /opt/forge/jars/bin/minecraft.jar net/minecraft/client/Minecraft.class
 javap -private net/minecraft/client/Minecraft.class
 ```
 
+## Obfuscation: which classes need reflection
+
+All `net.minecraft.*` classes are obfuscated in the runtime `minecraft.jar`. The JVM resolves
+**every class reference in a `.class` constant pool** at class-load time — not just executed code.
+So even `new EntityItem(...)` in a never-called method causes `NoClassDefFoundError` on load.
+
+Classes confirmed to require full reflection (never reference directly in bytecode):
+- `EntityLiving` → obfuscated to `md`
+- `EntityItem` → obfuscated to `px`
+- `EntityPlayerSP` → obfuscated
+
+Classes confirmed safe to reference directly (Forge transformers provide deobf names):
+- `EntityPlayer`, `EntityPlayerMP`, `Block`, `World`, `ItemStack`, `FoodStats`
+- All `net.minecraftforge.*` and `cpw.mods.fml.*` classes
+
+Rule: if a class is in `net.minecraft.entity.*` below `EntityPlayer`, use reflection.
+Use `Class.forName("full.class.Name")` for class lookup — string literals are safe.
+
 ## Known issues / deferred
 - Client keybind for toggle (alternative to sneak): requires `KeyInputEvent` + server sync packet.
   Deferred — sneak is simpler and works server-side without network code.
