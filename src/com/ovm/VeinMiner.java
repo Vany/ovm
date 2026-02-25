@@ -65,14 +65,19 @@ public class VeinMiner {
         try {
             if (event.action != PlayerInteractEvent.Action.LEFT_CLICK_BLOCK) return;
 
-            Object player = event.entityPlayer;   // EntityPlayer, but typed as Object
+            // entityPlayer is declared on PlayerEvent (superclass), not PlayerInteractEvent.
+            // Direct field access compiles to getfield on PlayerInteractEvent -> NoSuchFieldError
+            // at runtime. Use reflection to walk the superclass chain instead.
+            Object player = getField(event, "entityPlayer");
+            if (player == null) return;
             Object world  = getField(player, "worldObj");
             if (world == null) return;
 
             boolean isRemote = getBoolean(world, "isRemote");
             if (isRemote) return;
 
-            if (!OvmPacketHandler.isVeinKeyActive(event.entityPlayer)) return;
+            if (!(player instanceof net.minecraft.entity.player.EntityPlayer)) return;
+            if (!OvmPacketHandler.isVeinKeyActive((net.minecraft.entity.player.EntityPlayer) player)) return;
 
             int ox = event.x, oy = event.y, oz = event.z;
             int originId = invokeGetBlockId(world, ox, oy, oz);
