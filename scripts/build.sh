@@ -15,6 +15,7 @@ docker run --rm -v "$REPO:/workspace" $IMAGE bash -c "
   cp /workspace/src/com/ovm/mcmod.info /tmp/jarout/mcmod.info
   [ -f /workspace/src/pack.png ] && cp /workspace/src/pack.png /tmp/jarout/pack.png
   [ -f /workspace/src/pack.mcmeta ] && cp /workspace/src/pack.mcmeta /tmp/jarout/pack.mcmeta
+  [ -d /workspace/src/ovm ] && cp -r /workspace/src/ovm /tmp/jarout/ovm
   cd /tmp/jarout && jar cf /workspace/ovm-${VERSION}.jar .
 "
 
