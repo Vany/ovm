@@ -50,7 +50,7 @@ public class OvmConfig {
                 "LWJGL key code for the veinmine activation key (default: 41 = grave/backtick `; macOS isKeyDown(0) workaround applied automatically)"
             ).getInt(41);
 
-} finally {
+        } finally {
             cfg.save();
         }
     }

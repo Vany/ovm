@@ -7,13 +7,18 @@ import net.minecraftforge.event.entity.player.PlayerInteractEvent;
 import org.lwjgl.input.Keyboard;
 import java.io.ByteArrayOutputStream;
 import java.io.DataOutputStream;
-import java.lang.reflect.Field;
 import java.lang.reflect.Method;
 
 /**
  * Client-side event listener.
  * Key state polled via Keyboard.isKeyDown in onTick (game thread, after display init).
  * On macOS, KEY_GRAVE (41) reports as keycode 0 due to LWJGL 2 bug — we check both.
+ *
+ * Break detection: onPlayerInteract sets pending coords. onTick polls the block
+ * each tick and sends the veinmine packet when it transitions to air.
+ * For insta-break tools (shears on leaves), the block is already air when the
+ * interact event fires — onTick pre-caches the block ID at the crosshair position
+ * each tick so we have it available even after instant destruction.
  */
 @SideOnly(Side.CLIENT)
 public class OvmClientHandler {
@@ -24,6 +29,11 @@ public class OvmClientHandler {
     static int pendingY = Integer.MIN_VALUE;
     static int pendingZ = Integer.MIN_VALUE;
     static int pendingBlockId = 0;
+
+    // Block ID at crosshair, captured each tick before any break event.
+    // Used as fallback when getBlockId returns 0 at interact time (insta-break).
+    private static int crosshairX, crosshairY, crosshairZ;
+    private static int crosshairBlockId = 0;
 
     @ForgeSubscribe
     public void onPlayerInteract(PlayerInteractEvent event) {
@@ -37,34 +47,30 @@ public class OvmClientHandler {
         }
 
         if (event.x != pendingX || event.y != pendingY || event.z != pendingZ) {
-            // New block targeted — capture its id immediately and send.
-            // This handles both normal breaks (onTick will see air and send) and
-            // instant-break tools where the block may not become air between ticks.
-            Object mc = getMc();
-            Object world = mc != null ? getField(mc, "theWorld", "e") : null;
-            int bid = world != null ? invokeGetBlockId(world, event.x, event.y, event.z) : 0;
+            Object mc = McAccessor.getMc();
+            Object world = mc != null ? Reflect.getField(mc, Object.class, "theWorld", "e") : null;
+            int bid = world != null ? McAccessor.getBlockId(world, event.x, event.y, event.z) : 0;
+            // Insta-break: block already air, use crosshair cache from last tick
+            if (bid == 0 && event.x == crosshairX && event.y == crosshairY && event.z == crosshairZ)
+                bid = crosshairBlockId;
             pendingX = event.x;
             pendingY = event.y;
             pendingZ = event.z;
             pendingBlockId = bid;
-            if (bid != 0) {
-                // Instant-break path: send now, disable onTick to avoid double-send.
-                pendingX = Integer.MIN_VALUE;
-                pendingBlockId = 0;
-                System.out.println("[OVM] client: block broke id=" + bid + ", sending packet (" + event.x + "," + event.y + "," + event.z + ")");
-                sendPacket(event.x, event.y, event.z, bid);
-            }
+            System.out.println("[OVM] client: pending set id=" + bid + " at (" + event.x + "," + event.y + "," + event.z + ")");
         }
-        System.out.println("[OVM] client: pending veinmine set (" + pendingX + "," + pendingY + "," + pendingZ + ")");
     }
 
-    /** Called each CLIENT tick from VersionChatHandler (game thread). */
+    /** Called each CLIENT tick from ClientTickHandler (game thread). */
     static void onTick() {
         boolean keyNow = isActivationKeyDown();
         if (keyNow != activationKeyHeld) {
             activationKeyHeld = keyNow;
             System.out.println("[OVM] activationKey " + (keyNow ? "DOWN" : "UP"));
         }
+
+        // Cache block at crosshair for insta-break detection
+        updateCrosshair();
 
         if (pendingX == Integer.MIN_VALUE) return;
 
@@ -74,14 +80,13 @@ public class OvmClientHandler {
             return;
         }
 
-        Object mc = getMc();
+        Object mc = McAccessor.getMc();
         if (mc == null) return;
 
-        Object world = getField(mc, "theWorld", "e");
+        Object world = Reflect.getField(mc, Object.class, "theWorld", "e");
         if (world == null) return;
 
-        // Fallback for cases where onPlayerInteract fired before the world was ready.
-        int blockId = invokeGetBlockId(world, pendingX, pendingY, pendingZ);
+        int blockId = McAccessor.getBlockId(world, pendingX, pendingY, pendingZ);
         if (blockId != 0) {
             pendingBlockId = blockId;
         } else if (pendingBlockId != 0) {
@@ -91,18 +96,42 @@ public class OvmClientHandler {
             System.out.println("[OVM] client: block broke id=" + bid + ", sending packet (" + x + "," + y + "," + z + ")");
             sendPacket(x, y, z, bid);
         }
-        // else: block is already air and pendingBlockId is 0 — nothing to do, clear pending
         else { pendingX = Integer.MIN_VALUE; }
     }
 
     /**
-     * Check if the activation key is currently held.
-     * KEY_GRAVE (41) reports as keycode 0 on macOS due to LWJGL 2 bug, so we check both.
+     * Cache the block ID at the player's crosshair (objectMouseOver).
+     * This runs every tick before interact events, so for insta-break tools
+     * we have the block ID from the previous tick even if the block is already gone.
      */
+    private static void updateCrosshair() {
+        Object mc = McAccessor.getMc();
+        if (mc == null) return;
+        // Minecraft.objectMouseOver → MovingObjectPosition (MCP field_71476_x) / obf "x"
+        Object mop = Reflect.getField(mc, Object.class, "objectMouseOver", "x");
+        if (mop == null) return;
+        // MovingObjectPosition.typeOfHit → EnumMovingObjectType, 0=TILE
+        Object typeOfHit = Reflect.getField(mop, Object.class, "typeOfHit", "a");
+        if (typeOfHit == null) return;
+        // Check it's a block hit (TILE), not entity. EnumMovingObjectType.TILE.ordinal() == 0
+        if (typeOfHit instanceof Enum && ((Enum<?>) typeOfHit).ordinal() != 0) return;
+        int bx = Reflect.getField(mop, int.class, "blockX", "b");
+        int by = Reflect.getField(mop, int.class, "blockY", "c");
+        int bz = Reflect.getField(mop, int.class, "blockZ", "d");
+        Object world = Reflect.getField(mc, Object.class, "theWorld", "e");
+        if (world == null) return;
+        int bid = McAccessor.getBlockId(world, bx, by, bz);
+        if (bid != 0) {
+            crosshairX = bx;
+            crosshairY = by;
+            crosshairZ = bz;
+            crosshairBlockId = bid;
+        }
+    }
+
     private static boolean isActivationKeyDown() {
         int key = OvmConfig.activationKey;
         if (Keyboard.isKeyDown(key)) return true;
-        // macOS: KEY_GRAVE (41) comes through as keycode 0
         if (key == 41 && Keyboard.isKeyDown(0)) return true;
         return false;
     }
@@ -132,57 +161,5 @@ public class OvmClientHandler {
         } catch (Exception e) {
             System.out.println("[OVM] Failed to send packet: " + e);
         }
-    }
-
-    private static int invokeGetBlockId(Object world, int x, int y, int z) {
-        for (String n : new String[]{"getBlockId", "a"}) {
-            try {
-                return (Integer) world.getClass().getMethod(n, int.class, int.class, int.class).invoke(world, x, y, z);
-            } catch (Exception ignored) {}
-        }
-        return -1;
-    }
-
-    private static Object cachedMc = null;
-    static Object getMc() {
-        if (cachedMc != null) return cachedMc;
-        try {
-            Class<?> mcClass = Class.forName("net.minecraft.client.Minecraft");
-            for (String name : new String[]{"getMinecraft", "x"}) {
-                try {
-                    Method m = mcClass.getDeclaredMethod(name);
-                    m.setAccessible(true);
-                    cachedMc = m.invoke(null);
-                    if (cachedMc != null) return cachedMc;
-                } catch (Exception ignored) {}
-            }
-            for (String name : new String[]{"theMinecraft", "P"}) {
-                try {
-                    Field f = mcClass.getDeclaredField(name);
-                    f.setAccessible(true);
-                    cachedMc = f.get(null);
-                    if (cachedMc != null) return cachedMc;
-                } catch (Exception ignored) {}
-            }
-        } catch (Exception e) {
-            System.out.println("[OVM] getMc error: " + e);
-        }
-        return null;
-    }
-
-    static Object getLocalPlayer() {
-        Object mc = getMc();
-        if (mc == null) return null;
-        return getField(mc, "thePlayer", "g");
-    }
-
-    private static Object getField(Object obj, String mcpName, String obfName) {
-        for (String name : new String[]{mcpName, obfName}) {
-            try {
-                Field f = obj.getClass().getField(name);
-                return f.get(obj);
-            } catch (Exception ignored) {}
-        }
-        return null;
     }
 }

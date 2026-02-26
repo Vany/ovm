@@ -15,9 +15,7 @@ import cpw.mods.fml.common.network.NetworkRegistry;
 import cpw.mods.fml.common.registry.TickRegistry;
 import cpw.mods.fml.relauncher.Side;
 import cpw.mods.fml.relauncher.SideOnly;
-import net.minecraft.client.Minecraft;
 import net.minecraftforge.common.MinecraftForge;
-import java.lang.reflect.Field;
 import java.lang.reflect.Method;
 import java.util.EnumSet;
 
@@ -26,7 +24,7 @@ import java.util.EnumSet;
 public class OvmMod {
     public static final String MODID   = "ovm";
     public static final String NAME    = "OVM";
-    public static final String VERSION = "0.6.0";
+    public static final String VERSION = "0.6.1";
     public static final String CHANNEL = "OVM|VM";
 
     @Instance(MODID)
@@ -42,7 +40,6 @@ public class OvmMod {
     public void init(FMLInitializationEvent event) {
         System.out.println("[OVM] Init");
 
-        // Register packet channel with dynamic proxy to handle obfuscated types
         try {
             Object handler = OvmPacketHandler.createProxy();
             NetworkRegistry.instance().registerChannel(
@@ -52,7 +49,6 @@ public class OvmMod {
             System.out.println("[OVM] Failed to register packet channel: " + e);
         }
 
-        // Client-side: version chat + interaction listener
         if (event.getSide().isClient()) {
             initClient();
         }
@@ -60,7 +56,7 @@ public class OvmMod {
 
     @SideOnly(Side.CLIENT)
     private void initClient() {
-        TickRegistry.registerTickHandler(new VersionChatHandler(), Side.CLIENT);
+        TickRegistry.registerTickHandler(new ClientTickHandler(), Side.CLIENT);
         try {
             Class<?> cls = Class.forName("com.ovm.OvmClientHandler");
             Object handler = cls.newInstance();
@@ -78,10 +74,10 @@ public class OvmMod {
         System.out.println("[OVM] Post-init");
     }
 
-    // Prints version message to chat on the first available client tick
+    /** Prints version to chat on first tick, then delegates to OvmClientHandler.onTick(). */
     @SideOnly(Side.CLIENT)
-    private static class VersionChatHandler implements ITickHandler {
-        private boolean done = false;
+    private static class ClientTickHandler implements ITickHandler {
+        private boolean versionShown = false;
 
         @Override
         public void tickStart(EnumSet<TickType> type, Object... tickData) {}
@@ -90,54 +86,16 @@ public class OvmMod {
         public void tickEnd(EnumSet<TickType> type, Object... tickData) {
             OvmClientHandler.onTick();
 
-            if (done) return;
-            Minecraft mc = getMinecraft();
+            if (versionShown) return;
+            Object mc = McAccessor.getMc();
             if (mc == null) return;
-            try {
-                Object world = getField(mc, new String[]{"theWorld", "e"});
-                Object player = getField(mc, new String[]{"thePlayer", "g"});
-                if (world == null || player == null) return;
-                for (String name : new String[]{"addChatMessage", "a"}) {
-                    try {
-                        player.getClass().getMethod(name, String.class).invoke(player, NAME + " " + VERSION + " loaded. Hold ` + left-click to veinmine.");
-                        break;
-                    } catch (Exception e) { /* try next */ }
-                }
-                done = true;
-            } catch (Exception e) { /* not ready */ }
-        }
-
-        private static Object getField(Object obj, String[] names) throws Exception {
-            for (String name : names) {
-                try {
-                    Field f = obj.getClass().getField(name);
-                    f.setAccessible(true);
-                    return f.get(obj);
-                } catch (NoSuchFieldException e) { /* try next */ }
-            }
-            return null;
-        }
-
-        private static Minecraft cachedMc = null;
-        private static Minecraft getMinecraft() {
-            if (cachedMc != null) return cachedMc;
-            for (String name : new String[]{"x", "getMinecraft"}) {
-                try {
-                    Method m = Minecraft.class.getDeclaredMethod(name);
-                    m.setAccessible(true);
-                    cachedMc = (Minecraft) m.invoke(null);
-                    if (cachedMc != null) return cachedMc;
-                } catch (Exception e) { /* try next */ }
-            }
-            for (String name : new String[]{"P", "theMinecraft"}) {
-                try {
-                    Field f = Minecraft.class.getDeclaredField(name);
-                    f.setAccessible(true);
-                    cachedMc = (Minecraft) f.get(null);
-                    if (cachedMc != null) return cachedMc;
-                } catch (Exception e) { /* try next */ }
-            }
-            return null;
+            Object world = Reflect.getField(mc, Object.class, "theWorld", "e");
+            Object player = Reflect.getField(mc, Object.class, "thePlayer", "g");
+            if (world == null || player == null) return;
+            Reflect.invokeWithString(player,
+                NAME + " " + VERSION + " loaded. Hold ` + left-click to veinmine.",
+                "addChatMessage", "a");
+            versionShown = true;
         }
 
         @Override
@@ -147,7 +105,7 @@ public class OvmMod {
 
         @Override
         public String getLabel() {
-            return "OvmVersionChat";
+            return "OvmClientTick";
         }
     }
 }
